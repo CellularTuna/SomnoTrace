@@ -288,7 +288,18 @@ static ox_probe_mode_t s_probe_mode = OX_PROBE_PERSISTENT;
  * Still advertising at pull+130s can only mean re-worn. */
 #define OX_END_WINDOW_MS  130000
 #define OX_WORN_PROBE_MS  60000  /* LIVE_B interval while worn; END lasts ~120s */
-#define OX_F1_MAX_RETRIES 3      /* give up on F1 after N consecutive timeouts */
+#define OX_F1_MAX_RETRIES 5      /* give up on F1 after N consecutive timeouts */
+
+/* Some Gen2 rings (seen on SHQO2Pro fw 2D010003) ignore F1 for a while
+ * after taking off a full night's recording, then serve it normally
+ * after a sleep/wake.  Back-to-back reconnects (~20s apart) exhaust
+ * OX_F1_MAX_RETRIES inside ~95s.  After an F1 timeout, stay off the
+ * link for this long before reconnecting: long enough to give the ring
+ * idle time, short enough (< ~120s END timer) that it stays awake. */
+#define OX_F1_RETRY_GAP_MS 45000
+static TickType_t s_f1_retry_after = 0;  /* 0 = no gap pending */
+static bool s_f1_failed_last = false;    /* last do_pull_and_mark failed at F1 */
+static TickType_t s_off_finger_at = 0;   /* first off-finger seen this window */
 
 /* Persistent-mode polling: one held connection, unauthenticated LIVE_B.
  * See .ai/OXIMETRY2.md for the experiment that established this value. */
@@ -1413,6 +1424,8 @@ static void pair_task(void *arg)
     s_paired = true;
     s_presence_served = false;
     s_synced_this_idle = false;
+    s_f1_retry_after = 0;
+    s_off_finger_at = 0;
     s_pull_fail_count = 0;
     s_connect_fail_count = 0;
 
@@ -1483,9 +1496,13 @@ static bool do_pull_and_mark(bool *pulled_any)
     set_state(OX_STATUS_PULLING);
 
     char names[32][17];
+    s_f1_failed_last = false;
     int count = oxyii_get_file_list(names, 32);
     if (count < 0) {
         s_f1_fail_count++;
+        s_f1_failed_last = true;
+        s_f1_retry_after = xTaskGetTickCount() + pdMS_TO_TICKS(OX_F1_RETRY_GAP_MS);
+        if (s_f1_retry_after == 0) s_f1_retry_after = 1;  /* 0 means "none" */
         ESP_LOGW(TAG, "file list failed (op=0x%02x len=%d), attempt %d/%d",
                  s_resp_opcode, s_resp_payload_len,
                  s_f1_fail_count, OX_F1_MAX_RETRIES);
@@ -1496,12 +1513,22 @@ static bool do_pull_and_mark(bool *pulled_any)
              * (next take-off) will try again fresh. */
             s_presence_served = true;
             s_served_at = xTaskGetTickCount();
+            s_f1_retry_after = 0;
             ESP_LOGW(TAG, "F1 unreachable after %d attempts — treating as served, ring can sleep",
                      OX_F1_MAX_RETRIES);
+        } else {
+            ESP_LOGW(TAG, "F1 not ready — staying off the link %ds before retry",
+                     OX_F1_RETRY_GAP_MS / 1000);
         }
         return false;
     }
+    if (s_off_finger_at != 0) {
+        ESP_LOGI(TAG, "file list ready %lus after off-finger (F1 attempt %d)",
+                 (unsigned long)((xTaskGetTickCount() - s_off_finger_at) / configTICK_RATE_HZ),
+                 s_f1_fail_count + 1);
+    }
     s_f1_fail_count = 0;
+    s_f1_retry_after = 0;
     ESP_LOGI(TAG, "file list: %d files", count);
 
     bool pull_ok = true;
@@ -1581,6 +1608,9 @@ static void pull_task(void *arg)
                 s_presence_served = false;
             s_synced_this_idle = false;
             s_f1_fail_count = 0;
+            s_f1_retry_after = 0;
+            s_f1_failed_last = false;
+            s_off_finger_at = 0;
             s_pull_fail_count = 0;
             s_connect_fail_count = 0;
             xSemaphoreGive(s_ops_mtx);
@@ -1624,8 +1654,18 @@ static void pull_task(void *arg)
             ESP_LOGI(TAG, "watch: still advertising past END window — re-worn, resuming probes");
             s_presence_served = false;
             s_f1_fail_count = 0;
+            s_f1_retry_after = 0;
+            s_off_finger_at = 0;
             s_pull_fail_count = 0;
             s_connect_fail_count = 0;
+        }
+
+        /* F1 back-off: after a file-list timeout, do not reconnect until
+         * the gap has elapsed (passive scans only, as in END). */
+        if (s_f1_retry_after != 0 &&
+            (int32_t)(xTaskGetTickCount() - s_f1_retry_after) < 0) {
+            xSemaphoreGive(s_ops_mtx);
+            continue;
         }
 
         if (s_probe_mode == OX_PROBE_PERSISTENT) {
@@ -1668,6 +1708,7 @@ static void pull_task(void *arg)
                     }
 
                     /* Off-finger: upgrade to full session for pull. */
+                    if (s_off_finger_at == 0) s_off_finger_at = xTaskGetTickCount();
                     ESP_LOGI(TAG, "watch: off-finger detected — upgrading to full session");
                     /* MTU exchange now for file-transfer throughput. */
                     clear_op_sem();
@@ -1725,6 +1766,9 @@ static void pull_task(void *arg)
                         s_served_at = xTaskGetTickCount();
                         s_pull_fail_count = 0;
                         ESP_LOGI(TAG, "sync window served — no reconnect; ring powers off on its own");
+                    } else if (!s_presence_served && s_f1_failed_last) {
+                        /* F1 not ready yet: OX_F1_MAX_RETRIES and the
+                         * F1 back-off gap govern; don't burn pull retries. */
                     } else if (!s_presence_served) {
                         /* Pull failed.  Retry quickly while the ring is still
                          * advertising.  After OX_PULL_MAX_FAST_RETRIES, apply
@@ -1744,6 +1788,7 @@ static void pull_task(void *arg)
                 } else if (off == 0) {
                     /* On-finger: hold connection, wait before next poll. */
                     s_synced_this_idle = false;
+                    s_off_finger_at = 0;
                     set_state(OX_STATUS_MONITORING);
                     vTaskDelay(pdMS_TO_TICKS(OX_PERSISTENT_POLL_MS));
                     /* Connection may have dropped during the delay. */
@@ -1817,6 +1862,7 @@ static void pull_task(void *arg)
         int off = oxyii_off_finger();
         if (off != 1) {
             s_synced_this_idle = false;
+            if (off == 0) s_off_finger_at = 0;
             ESP_LOGI(TAG, "watch: not off-finger (live_b=%d) — disconnect, retry in %ds",
                      off, OX_WORN_PROBE_MS / 1000);
             do_disconnect();
@@ -1825,6 +1871,8 @@ static void pull_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(OX_WORN_PROBE_MS));
             continue;
         }
+
+        if (s_off_finger_at == 0) s_off_finger_at = xTaskGetTickCount();
 
         if (s_synced_this_idle) {
             ESP_LOGI(TAG, "watch: ring off-finger / charging (already synced) — standby");
@@ -1852,6 +1900,9 @@ static void pull_task(void *arg)
             s_served_at = xTaskGetTickCount();
             s_pull_fail_count = 0;
             ESP_LOGI(TAG, "sync window served — no reconnect; ring powers off on its own");
+        } else if (!s_presence_served && s_f1_failed_last) {
+            /* F1 not ready yet: OX_F1_MAX_RETRIES and the F1 back-off
+             * gap govern; don't burn pull retries. */
         } else if (!s_presence_served) {
             /* Pull failed.  Retry quickly while the ring is still
              * advertising.  After OX_PULL_MAX_FAST_RETRIES, apply
