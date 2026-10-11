@@ -712,9 +712,9 @@ static void publish_discovery_payloads(void)
         cJSON_AddStringToObject(c, "name", "In Therapy");
         cJSON_AddStringToObject(c, "unique_id", uniq);
         cJSON_AddStringToObject(c, "state_topic", s_state_topic);
-        cJSON_AddStringToObject(c, "value_template", "{{ value_json.in_therapy }}");
-        cJSON_AddStringToObject(c, "payload_on", "true");
-        cJSON_AddStringToObject(c, "payload_off", "false");
+        cJSON_AddStringToObject(c, "value_template", "{{ 'ON' if value_json.in_therapy else 'OFF' }}");
+        cJSON_AddStringToObject(c, "payload_on", "ON");
+        cJSON_AddStringToObject(c, "payload_off", "OFF");
         cJSON_AddStringToObject(c, "icon", "mdi:sleep");
         publish_entity_discovery("binary_sensor", "in_therapy", c);
     }
@@ -738,9 +738,9 @@ static void publish_discovery_payloads(void)
         cJSON_AddStringToObject(c, "name", "CPAP Connected");
         cJSON_AddStringToObject(c, "unique_id", uniq);
         cJSON_AddStringToObject(c, "state_topic", s_state_topic);
-        cJSON_AddStringToObject(c, "value_template", "{{ value_json.as11_connected }}");
-        cJSON_AddStringToObject(c, "payload_on", "true");
-        cJSON_AddStringToObject(c, "payload_off", "false");
+        cJSON_AddStringToObject(c, "value_template", "{{ 'ON' if value_json.as11_connected else 'OFF' }}");
+        cJSON_AddStringToObject(c, "payload_on", "ON");
+        cJSON_AddStringToObject(c, "payload_off", "OFF");
         cJSON_AddStringToObject(c, "device_class", "connectivity");
         publish_entity_discovery("binary_sensor", "as11_connected", c);
     }
@@ -752,9 +752,9 @@ static void publish_discovery_payloads(void)
         cJSON_AddStringToObject(c, "name", "Oximeter Connected");
         cJSON_AddStringToObject(c, "unique_id", uniq);
         cJSON_AddStringToObject(c, "state_topic", s_state_topic);
-        cJSON_AddStringToObject(c, "value_template", "{{ value_json.oximeter_connected }}");
-        cJSON_AddStringToObject(c, "payload_on", "true");
-        cJSON_AddStringToObject(c, "payload_off", "false");
+        cJSON_AddStringToObject(c, "value_template", "{{ 'ON' if value_json.oximeter_connected else 'OFF' }}");
+        cJSON_AddStringToObject(c, "payload_on", "ON");
+        cJSON_AddStringToObject(c, "payload_off", "OFF");
         cJSON_AddStringToObject(c, "device_class", "connectivity");
         publish_entity_discovery("binary_sensor", "oximeter_connected", c);
     }
@@ -780,9 +780,9 @@ static void publish_discovery_payloads(void)
         cJSON_AddStringToObject(c, "name", "Battery Charging");
         cJSON_AddStringToObject(c, "unique_id", uniq);
         cJSON_AddStringToObject(c, "state_topic", s_state_topic);
-        cJSON_AddStringToObject(c, "value_template", "{{ value_json.battery_charging }}");
-        cJSON_AddStringToObject(c, "payload_on", "true");
-        cJSON_AddStringToObject(c, "payload_off", "false");
+        cJSON_AddStringToObject(c, "value_template", "{{ 'ON' if value_json.battery_charging else 'OFF' }}");
+        cJSON_AddStringToObject(c, "payload_on", "ON");
+        cJSON_AddStringToObject(c, "payload_off", "OFF");
         cJSON_AddStringToObject(c, "device_class", "battery_charging");
         publish_entity_discovery("binary_sensor", "battery_charging", c);
     }
@@ -880,12 +880,12 @@ static void publish_discovery_payloads(void)
         cJSON_AddStringToObject(c, "name", "Therapy Switch");
         cJSON_AddStringToObject(c, "unique_id", uniq);
         cJSON_AddStringToObject(c, "state_topic", s_state_topic);
-        cJSON_AddStringToObject(c, "value_template", "{{ value_json.in_therapy }}");
+        cJSON_AddStringToObject(c, "value_template", "{{ 'ON' if value_json.in_therapy else 'OFF' }}");
         cJSON_AddStringToObject(c, "command_topic", s_cmd_therapy_topic);
         cJSON_AddStringToObject(c, "payload_on", "START");
         cJSON_AddStringToObject(c, "payload_off", "STOP");
-        cJSON_AddStringToObject(c, "state_on", "true");
-        cJSON_AddStringToObject(c, "state_off", "false");
+        cJSON_AddStringToObject(c, "state_on", "ON");
+        cJSON_AddStringToObject(c, "state_off", "OFF");
         cJSON_AddStringToObject(c, "icon", "mdi:power");
         publish_entity_discovery("switch", "therapy", c);
     }
