@@ -74,6 +74,8 @@ static const char *TAG = "mqtt";
 
 /* Fixed 60s telemetry timer (non-configurable for 2.4 GHz radio coexistence). */
 #define TELEMETRY_INTERVAL_MS (60 * 1000)
+#define LIVE_INTERVAL_MS (10 * 1000)
+#define LIVE_EXPIRE_S 30
 
 /* Commands received on subscribed topics are deferred to the telemetry task:
  * as11_ble_start/stop_therapy() are blocking RPCs (up to 10 s) and must not
@@ -96,6 +98,7 @@ static TaskHandle_t             s_telemetry_task = NULL;
 static QueueHandle_t            s_cmd_q = NULL;
 static char                     s_lwt_topic[64] = {0};
 static char                     s_state_topic[64] = {0};
+static char                     s_live_topic[64] = {0};
 static char                     s_cmd_therapy_topic[64] = {0};
 static char                     s_cmd_alert_topic[64] = {0};
 static char                     s_cmd_uploader_topic[64] = {0};
@@ -134,6 +137,7 @@ static void update_topic_strings(const char *prefix)
     const char *p = (prefix && prefix[0] != '\0') ? prefix : MQTT_DEFAULT_PREFIX;
     snprintf(s_lwt_topic, sizeof(s_lwt_topic), "%s/status", p);
     snprintf(s_state_topic, sizeof(s_state_topic), "%s/state", p);
+    snprintf(s_live_topic, sizeof(s_live_topic), "%s/live", p);
     snprintf(s_cmd_therapy_topic, sizeof(s_cmd_therapy_topic), "%s/cmd/therapy", p);
     snprintf(s_cmd_alert_topic, sizeof(s_cmd_alert_topic), "%s/cmd/alert", p);
     snprintf(s_cmd_uploader_topic, sizeof(s_cmd_uploader_topic), "%s/cmd/uploader", p);
@@ -584,6 +588,40 @@ static void do_publish_state(void)
     cJSON_free(json);
 }
 
+static void do_publish_live(void)
+{
+    bsp_live_stats_t live;
+    bsp_display_get_live_stats(&live);
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+    cJSON_AddBoolToObject(root, "leak_valid", live.leak_valid);
+    cJSON_AddBoolToObject(root, "pressure_valid", live.pressure_valid);
+    if (live.leak_valid) {
+        cJSON_AddNumberToObject(root, "leak_rate", live.leak_lpm);
+        cJSON_AddNumberToObject(root, "leak_avg", live.leak_avg_lpm);
+    } else {
+        cJSON_AddNullToObject(root, "leak_rate");
+        cJSON_AddNullToObject(root, "leak_avg");
+    }
+    if (live.pressure_valid) cJSON_AddNumberToObject(root, "pressure", live.pressure_cmh2o);
+    else cJSON_AddNullToObject(root, "pressure");
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) return;
+    if (s_mtx) xSemaphoreTake(s_mtx, portMAX_DELAY);
+    if (s_client && s_conn_state == MQTT_STATE_CONNECTED) {
+        esp_mqtt_client_publish(s_client, s_live_topic, json, 0, 0, 0);
+    }
+    if (s_mtx) xSemaphoreGive(s_mtx);
+    cJSON_free(json);
+}
+
+static int64_t telemetry_wait_ms(int64_t now, int64_t next_state, int64_t next_live, bool active)
+{
+    int64_t next = active && next_live < next_state ? next_live : next_state;
+    return next > now ? next - now : 1;
+}
+
 static void execute_command(mqtt_cmd_t cmd)
 {
     switch (cmd) {
@@ -611,9 +649,15 @@ static void execute_command(mqtt_cmd_t cmd)
 static void mqtt_telemetry_task(void *arg)
 {
     (void)arg;
+    int64_t now = esp_timer_get_time() / 1000;
+    int64_t next_state = now + TELEMETRY_INTERVAL_MS;
+    int64_t next_live = now + LIVE_INTERVAL_MS;
+    bool was_active = false;
     while (1) {
         /* Wait for 60s telemetry tick or an immediate event notification */
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(TELEMETRY_INTERVAL_MS));
+        bool active = bsp_display_is_therapy_active();
+        int64_t wait = telemetry_wait_ms(esp_timer_get_time() / 1000, next_state, next_live, active);
+        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait));
 
         /* Execute any deferred command-topic messages first. Blocking BLE
          * RPCs are safe here — this is our own worker, not the MQTT task. */
@@ -624,9 +668,19 @@ static void mqtt_telemetry_task(void *arg)
             }
         }
 
+        now = esp_timer_get_time() / 1000;
+        active = bsp_display_is_therapy_active();
+        bool state_due = now >= next_state;
+        bool live_due = active && now >= next_live;
+        bool transition = active != was_active;
         if (mqtt_manager_get_state() == MQTT_STATE_CONNECTED) {
-            do_publish_state();
+            if (notified || state_due) do_publish_state();
+            if (notified || state_due || live_due || transition) do_publish_live();
         }
+        now = esp_timer_get_time() / 1000;
+        if (state_due) next_state = now + TELEMETRY_INTERVAL_MS;
+        if (live_due || transition) next_live = now + LIVE_INTERVAL_MS;
+        was_active = active;
     }
 }
 
@@ -680,9 +734,11 @@ static void publish_entity_discovery(const char *component, const char *object_i
     }
 
     /* Common availability & device */
-    cJSON_AddStringToObject(cfg, "availability_topic", s_lwt_topic);
-    cJSON_AddStringToObject(cfg, "payload_available", "online");
-    cJSON_AddStringToObject(cfg, "payload_not_available", "offline");
+    if (!cJSON_GetObjectItem(cfg, "availability")) {
+        cJSON_AddStringToObject(cfg, "availability_topic", s_lwt_topic);
+        cJSON_AddStringToObject(cfg, "payload_available", "online");
+        cJSON_AddStringToObject(cfg, "payload_not_available", "offline");
+    }
     add_device_info(cfg);
 
     char disc_topic[128];
@@ -699,6 +755,35 @@ static void publish_entity_discovery(const char *component, const char *object_i
     }
     if (s_mtx) xSemaphoreGive(s_mtx);
     cJSON_free(payload);
+}
+
+static void publish_live_sensor(const char *key, const char *name, const char *unit,
+                                const char *valid_key, const char *icon)
+{
+    cJSON *c = cJSON_CreateObject();
+    if (!c) return;
+    char uniq[64], tmpl[96];
+    snprintf(uniq, sizeof(uniq), "%s_%s", s_device_id, key);
+    snprintf(tmpl, sizeof(tmpl), "{{ value_json.%s }}", key);
+    cJSON_AddStringToObject(c, "name", name);
+    cJSON_AddStringToObject(c, "unique_id", uniq);
+    cJSON_AddStringToObject(c, "state_topic", s_live_topic);
+    cJSON_AddStringToObject(c, "value_template", tmpl);
+    cJSON_AddStringToObject(c, "unit_of_measurement", unit);
+    cJSON_AddStringToObject(c, "state_class", "measurement");
+    cJSON_AddStringToObject(c, "icon", icon);
+    cJSON_AddNumberToObject(c, "expire_after", LIVE_EXPIRE_S);
+    cJSON_AddStringToObject(c, "availability_mode", "all");
+    cJSON *availability = cJSON_AddArrayToObject(c, "availability");
+    cJSON *broker = cJSON_CreateObject();
+    cJSON_AddStringToObject(broker, "topic", s_lwt_topic);
+    cJSON_AddItemToArray(availability, broker);
+    cJSON *fresh = cJSON_CreateObject();
+    snprintf(tmpl, sizeof(tmpl), "{{ 'online' if value_json.%s else 'offline' }}", valid_key);
+    cJSON_AddStringToObject(fresh, "topic", s_live_topic);
+    cJSON_AddStringToObject(fresh, "value_template", tmpl);
+    cJSON_AddItemToArray(availability, fresh);
+    publish_entity_discovery("sensor", key, c);
 }
 
 static void publish_discovery_payloads(void)
@@ -914,6 +999,10 @@ static void publish_discovery_payloads(void)
         cJSON_AddStringToObject(c, "entity_category", "diagnostic");
         publish_entity_discovery("button", "upload_scan", c);
     }
+
+    publish_live_sensor("leak_rate", "Leak Rate", "L/min", "leak_valid", "mdi:air-filter");
+    publish_live_sensor("leak_avg", "Session Average Leak", "L/min", "leak_valid", "mdi:air-filter");
+    publish_live_sensor("pressure", "Mask Pressure", "cmH2O", "pressure_valid", "mdi:gauge");
 }
 
 /* ── JSON Config API (REST) ──────────────────────────────────────────── */

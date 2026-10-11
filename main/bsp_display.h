@@ -26,7 +26,19 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 #include "esp_err.h"
+
+#define BSP_LIVE_STALE_US (15LL * 1000000)
+
+typedef struct {
+    bool active;
+    bool leak_valid;
+    bool pressure_valid;
+    float leak_lpm;
+    float leak_avg_lpm;
+    float pressure_cmh2o;
+} bsp_live_stats_t;
 
 esp_err_t bsp_display_init(void);
 void bsp_display_show_number(uint32_t value);
@@ -44,6 +56,8 @@ void bsp_display_set_battery(int percent, bool charging, bool valid);
 void bsp_display_set_therapy_active(bool active);
 void bsp_display_push_flow(float flow_lpm);
 void bsp_display_push_leak(float leak_lpm);
+void bsp_display_push_pressure(float pressure_cmh2o);
+void bsp_display_get_live_stats(bsp_live_stats_t *out);
 void bsp_display_set_therapy_start_time(int64_t start_us);
 bool bsp_display_is_therapy_active(void);
 

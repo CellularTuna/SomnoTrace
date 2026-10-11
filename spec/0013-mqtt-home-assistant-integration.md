@@ -10,7 +10,7 @@
 
 ## 1. Summary
 
-This specification defines the MQTT communication protocol, entity model, and Home Assistant Auto-Discovery integration for SomnoTrace. It provides real-time state and event telemetry (therapy start/stop, mask-off safety alarms, Bluetooth connection status, battery levels, and optional remote switches) over a single persistent TCP connection. Every entity is sourced directly from existing in-memory variables with zero on-chip statistical calculations.
+This specification defines the MQTT communication protocol, entity model, and Home Assistant Auto-Discovery integration for SomnoTrace. It provides real-time state and event telemetry (therapy start/stop, mask-off safety alarms, Bluetooth connection status, battery levels, and optional remote switches) over a single persistent TCP connection. Entities are sourced from in-memory state. Live leak telemetry reuses the LCD's constant-memory session accumulator; no recording-file scans or percentile calculations are performed for MQTT.
 
 ---
 
@@ -32,10 +32,10 @@ This section explicitly documents what was excluded from the MQTT design and the
 * **Smart Home Mismatch:** Home automations do not trigger on 95th percentile values or historical AHI.
 * **Native Alternative:** Home Assistant already contains a built-in `history_stats` platform that calculates daily compliance hours and session totals natively from the binary `in_therapy` sensor in 4 lines of YAML.
 
-### 3.2 No Live Vitals Streaming ($\text{SpO}_2$, Pulse, Mask Pressure)
+### 3.2 No Live Oximetry Vitals Streaming ($\text{SpO}_2$, Pulse)
 * **O2 Ring Hardware Architecture:** Wellue O2 Rings (both Gen 1 and Gen 2) record internally during sleep and only transfer data as a batch file **after** the ring is removed from the finger in the morning. Gen 1 turns off BLE advertising while on-finger; Gen 2 (OxyII) connects every 30–60 seconds strictly to run an off-finger check (`LIVE_B`), because downloading data while on-finger is forbidden by ring firmware. A 30–60s check is too infrequent to serve as "live" vitals.
 * **Nonin Inconsistency:** While Nonin WristOx2 3150 does stream 1 Hz vitals via the AS11, very few users own this expensive adapter. Having sensors that work for Nonin but remain permanently unavailable for O2 Ring creates an inconsistent user experience.
-* **Oscillating Waveforms:** Mask pressure oscillates at 25 Hz with every breath. Sampling every 5–10s simply captures random points on a breathing curve (e.g. 5.1 $\text{cmH}_2\text{O}$ on exhale vs 9.2 on inhale), providing zero smart-home utility.
+* **Mask Pressure Exception:** The AS11 already supplies `MaskPressure-TwoSecond`. Its latest valid value is published with live leak telemetry; the 25 Hz mask-pressure waveform is not sent, and no extra pressure smoothing or rolling buffer is introduced.
 
 ### 3.3 No 25 Hz Waveforms or Log Streaming
 * **Rationale:** High-frequency flow and pressure waveforms remain strictly in `.snt` and `.edf` files on the SD card. Console logs belong in Syslog (RFC 5424) or serial output. Streaming them over MQTT would flood Wi-Fi airtime and broker queues.
@@ -74,14 +74,30 @@ To minimize network packets, CPU wakeups, and broker overhead, SomnoTrace avoids
   }
   ```
 - **Cadence & Triggers (Single-Timer + Event-Driven Hybrid):**
-  1. **Fixed 60-Second Telemetry Timer (Non-Configurable):** A single timer fires every 60 seconds to sample in-memory battery, Wi-Fi RSSI, duration, and uptime, publishing the combined JSON state. The 60-second interval is intentionally hardcoded and non-configurable to protect 2.4 GHz radio coexistence and prevent Wi-Fi TX/retransmissions from contending with the active 25 Hz BLE StreamData reception during sleep.
+  1. **Fixed 60-Second General Telemetry:** The existing worker publishes general state every 60 seconds using a monotonic deadline. Immediate notifications do not postpone that deadline. General telemetry, including the SD free-space query, is not run on each live-data tick.
   2. **Immediate Event Bypass:** Any state transition (therapy start/stop, alert state change, charger connect/disconnect) bypasses the timer and immediately publishes an updated state JSON (< 50 ms latency).
+
+### 4.2.1 Live AS11 telemetry
+
+The same worker publishes a small JSON snapshot to `<base_topic>/live` every 10 seconds during therapy, and on connection/state notifications. Idle snapshots accompany general telemetry. There are no extra BLE requests or SD reads.
+
+```json
+{"leak_valid":true,"pressure_valid":true,"leak_rate":2.4,"leak_avg":1.8,"pressure":8.2}
+```
+
+- `leak_rate`: latest valid leak sample, in L/min.
+- `leak_avg`: mean of valid received leak samples in the active session, shared with the LCD. Batched leak arrays contribute every valid sample; missing samples are excluded, not treated as zero. A new therapy session resets the accumulator; duplicate TherapyStart notifications and screen changes do not.
+- `pressure`: latest valid `MaskPressure-TwoSecond` sample, in cmH2O.
+- Readings become invalid after 15 seconds without a valid sample, on BLE disconnect, or when therapy stops. Invalid values are JSON `null`; `leak_valid` governs both leak sensors and `pressure_valid` governs pressure.
+- Live snapshots use QoS 0 and are not retained or queued for replay. Disconnected publication is skipped. Discovery configurations remain retained.
+- Home Assistant combines device LWT availability with per-reading validity using `availability_mode: all`. Live sensors also use `expire_after: 30` to become unavailable if live delivery stops.
+- Ten-second radio coexistence behavior still requires real-device validation under active BLE streaming; host tests verify lifecycle and scheduling, not radio reliability.
 
 ### 4.3 Home Assistant MQTT Auto-Discovery
 Upon connecting to the broker, SomnoTrace publishes retained discovery payloads to:
 `homeassistant/<component>/somnotrace/<object_id>/config`
 
-Each entity references `state_topic: "<base_topic>/state"` and extracts its field via `value_template: "{{ value_json.<key> }}"`. All entities update simultaneously in Home Assistant in a single transaction.
+General entities reference `state_topic: "<base_topic>/state"`; live leak and pressure entities reference `<base_topic>/live`. Numeric entities extract their fields with `{{ value_json.<key> }}`. Binary entities and the therapy switch explicitly render `ON`/`OFF`; the switch's command payloads remain `START`/`STOP`.
 
 All entities are bound to a single Home Assistant Device:
 ```json
@@ -127,6 +143,16 @@ All entities are bound to a single Home Assistant Device:
 | `sd_free_mb` | `sensor` | `sd_free_mb` | `s_status_cache.sd_free / (1024*1024)` | Free space on SD card in megabytes. |
 
 ---
+
+#### Tier 4: Live Therapy Measurements (10-second publication)
+
+| Discovery Object ID | Component | JSON Key | Unit | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `leak_rate` | `sensor` | `leak_rate` | `L/min` | Current leak rate. |
+| `leak_avg` | `sensor` | `leak_avg` | `L/min` | Session Average Leak, from the shared LCD accumulator. |
+| `pressure` | `sensor` | `pressure` | `cmH2O` | Current two-second mask pressure, not prescribed IPAP/EPAP. |
+
+All three are auto-discovered measurement sensors, grouped under the existing SomnoTrace device. No additional Home Assistant YAML or firmware setting is needed when MQTT and discovery are enabled.
 
 ### 4.4 Bidirectional Command Topics (Optional Controls)
 

@@ -182,6 +182,19 @@ static float    s_leak_lpm = 0.0f;       /* latest leak rate (L/min) */
 static double   s_leak_sum = 0.0;        /* accumulated leak sum for session average */
 static uint32_t s_leak_count = 0;        /* count of accumulated leak samples */
 static int64_t  s_therapy_start_us = 0;  /* monotonic time of TherapyStart */
+static int64_t  s_leak_updated_us = 0;
+static int64_t  s_pressure_updated_us = 0;
+static float    s_pressure_cmh2o = 0.0f;
+
+static void reset_live_stats(void)
+{
+    s_leak_lpm = 0.0f;
+    s_leak_sum = 0.0;
+    s_leak_count = 0;
+    s_leak_updated_us = 0;
+    s_pressure_updated_us = 0;
+    s_pressure_cmh2o = 0.0f;
+}
 
 /* ── Public state-mutating API (never draws; render task handles drawing) ── */
 
@@ -217,8 +230,7 @@ void bsp_display_set_therapy_active(bool active)
          * preserve them if the user changes screen preferences mid-session. */
         s_flow_head = 0;
         s_flow_count = 0;
-        s_leak_sum = 0.0;
-        s_leak_count = 0;
+        reset_live_stats();
     }
 
     if (s_mode != new_mode) {
@@ -287,14 +299,50 @@ void bsp_display_push_flow(float flow_lpm)
 
 void bsp_display_push_leak(float leak_lpm)
 {
+    if (!s_state_mutex || !isfinite(leak_lpm) || leak_lpm < 0) return;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_therapy_active) {
+        s_leak_lpm = leak_lpm;
+        s_leak_sum += leak_lpm;
+        s_leak_count++;
+        s_leak_updated_us = esp_timer_get_time();
+    }
+    bool notify = s_therapy_active && s_mode == DISP_MODE_INFO;
+    xSemaphoreGive(s_state_mutex);
+    if (notify && s_display_task)
+        xTaskNotifyGive(s_display_task);
+}
+
+void bsp_display_push_pressure(float pressure_cmh2o)
+{
+    if (!s_state_mutex || !isfinite(pressure_cmh2o) || pressure_cmh2o < 0) return;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_therapy_active) {
+        s_pressure_cmh2o = pressure_cmh2o;
+        s_pressure_updated_us = esp_timer_get_time();
+    }
+    xSemaphoreGive(s_state_mutex);
+}
+
+void bsp_display_get_live_stats(bsp_live_stats_t *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
     if (!s_state_mutex) return;
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-    s_leak_lpm = leak_lpm;
-    s_leak_sum += leak_lpm;
-    s_leak_count++;
+    int64_t now = esp_timer_get_time();
+    out->active = s_therapy_active;
+    bool ready = s_therapy_active && s_as11_paired;
+    out->leak_valid = ready && s_leak_count > 0 && s_leak_updated_us > 0 &&
+                      now - s_leak_updated_us < BSP_LIVE_STALE_US;
+    out->pressure_valid = ready && s_pressure_updated_us > 0 &&
+                          now - s_pressure_updated_us < BSP_LIVE_STALE_US;
+    if (out->leak_valid) {
+        out->leak_lpm = s_leak_lpm;
+        out->leak_avg_lpm = (float)(s_leak_sum / s_leak_count);
+    }
+    if (out->pressure_valid) out->pressure_cmh2o = s_pressure_cmh2o;
     xSemaphoreGive(s_state_mutex);
-    if (s_mode == DISP_MODE_INFO && s_display_task)
-        xTaskNotifyGive(s_display_task);
 }
 
 void bsp_display_set_therapy_start_time(int64_t start_us)
@@ -302,8 +350,7 @@ void bsp_display_set_therapy_start_time(int64_t start_us)
     if (!s_state_mutex) return;
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     s_therapy_start_us = start_us;
-    s_leak_sum = 0.0;
-    s_leak_count = 0;
+    reset_live_stats();
     xSemaphoreGive(s_state_mutex);
 }
 
@@ -879,6 +926,10 @@ void bsp_display_set_as11_paired(bool paired)
     }
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     s_as11_paired = paired;
+    if (!paired) {
+        s_leak_updated_us = 0;
+        s_pressure_updated_us = 0;
+    }
     s_status_dirty = true;
     xSemaphoreGive(s_state_mutex);
     if (s_display_task) xTaskNotifyGive(s_display_task);

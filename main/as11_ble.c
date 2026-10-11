@@ -43,6 +43,7 @@
 #include "as11_adv.h"
 #include "session_writer.h"
 #include "bsp_display.h"
+#include "mqtt_manager.h"
 #include "time_sync.h"
 #include "therapy_alert.h"
 #include "net_provision.h"
@@ -463,6 +464,7 @@ static void set_state(const char *st)
     }
     xSemaphoreGive(s_state_mtx);
     bsp_display_set_as11_paired(strcmp(st, AS11_STATUS_PAIRED) == 0);
+    mqtt_manager_publish_state(true);
     log_stream_request_ble_push();
 }
 
@@ -473,6 +475,7 @@ static void set_error(const char *msg)
     s_state = AS11_STATUS_ERROR;
     xSemaphoreGive(s_state_mtx);
     bsp_display_set_as11_paired(false);
+    mqtt_manager_publish_state(true);
     ESP_LOGE(TAG, "error: %s", msg ? msg : "");
     log_stream_request_ble_push();
 }

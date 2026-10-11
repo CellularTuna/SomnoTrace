@@ -176,6 +176,7 @@ else
     skip_test edf_gen_test "no cJSON (apt install libcjson-dev, or set CJSON_DIR=<dir with cJSON.c/.h>)"
     skip_test edf_properties_test "no cJSON"
     skip_test upload_ox_test "no cJSON"
+    skip_test mqtt_live_contract_test "no cJSON"
 fi
 if [ -n "$CJ_INC" ]; then
     run_test edf_gen_test $CJ_INC -I"$SHIM" -I"$MAIN_DIR" \
@@ -190,6 +191,7 @@ if [ -n "$CJ_INC" ]; then
         '-DSD_MOUNT_POINT="/tmp/somnotrace_oxt/sd"' \
         '-DUPLOAD_STATE_DIR="/tmp/somnotrace_oxt/ustate"' \
         scripts/upload_ox_test.c "$UPLOADER_DIR/upload_ox.c" $CJ_SRC $CJ_LIB
+    run_check mqtt_live_contract_test python3 scripts/mqtt_live_contract_test.py
 fi
 
 # The mutation harness's TEXTUAL layer has nothing else to catch a mistake in it. Every

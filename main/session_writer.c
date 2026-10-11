@@ -2012,8 +2012,8 @@ void session_writer_on_stream_data_raw(const char *json, int len)
     const char *p = json;
     const char *end = json + len;
 
-    int16_t flow_vals[32], press_vals[32];
-    int flow_n = 0, press_n = 0;
+    int16_t flow_vals[32], press_vals[32], leak_vals[32];
+    int flow_n = 0, press_n = 0, leak_n = 0;
     int16_t hr_val = -1, spo2_val = -1;
     bool hr_found = false, spo2_found = false;
     int16_t pld_vals[12];
@@ -2063,6 +2063,12 @@ void session_writer_on_stream_data_raw(const char *json, int len)
             memcpy(press_vals, vals, n * sizeof(int16_t));
             press_n = n;
             break;
+        case KEY_LEAK:
+            memcpy(leak_vals, vals, n * sizeof(int16_t));
+            leak_n = n;
+            pld_vals[3] = vals[n - 1];
+            pld_found[3] = true;
+            break;
         case KEY_HEART_RATE:
             hr_val = vals[n - 1];
             hr_found = true;
@@ -2088,13 +2094,6 @@ void session_writer_on_stream_data_raw(const char *json, int len)
         if (abs(flow_vals[j]) > 50) has_active_flow = true;
     }
 
-    /* Push leak rate to display for info panel mode.
-     * PLD channel 3 = Leak, stored as value*100 in L/s (same raw format
-     * as .snt files).  Convert to L/min: dig * 0.6f, matching
-     * pld_leak_phys() in session_graph.c. */
-    if (pld_found[3] && pld_vals[3] >= 0)
-        bsp_display_push_leak(pld_vals[3] * 0.6f);
-
     bool has_therapy_pressure = false;
     for (int j = 0; j < press_n; j++) {
         if (press_vals[j] > 200) has_therapy_pressure = true;
@@ -2119,6 +2118,16 @@ void session_writer_on_stream_data_raw(const char *json, int len)
                      "graph active but NOT recording to SD");
         }
     }
+
+    /* Push leak rate to display for info panel mode.
+     * PLD channel 3 = Leak, stored as value*100 in L/s (same raw format
+     * as .snt files).  Convert to L/min: dig * 0.6f, matching
+     * pld_leak_phys() in session_graph.c. */
+    for (int j = 0; j < leak_n; j++) {
+        if (leak_vals[j] >= 0) bsp_display_push_leak(leak_vals[j] * 0.6f);
+    }
+    if (pld_found[0] && pld_vals[0] >= 0)
+        bsp_display_push_pressure(pld_vals[0] / 100.0f);
 
     if (!s || !session_writer_is_active(s)) return;
 
@@ -2353,8 +2362,6 @@ void session_writer_on_notification(session_writer_t *s, const cJSON *msg)
             s_in_cooldown = false;
             therapy_alert_on_therapy_start();
             bsp_display_set_therapy_active(true);
-            bsp_display_set_therapy_start_time(esp_timer_get_time());
-            mqtt_manager_on_therapy_start();
 
             int64_t now_us = esp_timer_get_time();
             bool duplicate = false;
@@ -2366,6 +2373,8 @@ void session_writer_on_notification(session_writer_t *s, const cJSON *msg)
             }
             if (report && report[0])
                 strlcpy(s_last_start_report, report, sizeof(s_last_start_report));
+            if (!duplicate) bsp_display_set_therapy_start_time(now_us);
+            mqtt_manager_on_therapy_start();
 
             if (s && s->active && !duplicate) {
                 /* A genuine TherapyStart while a session is still open means
