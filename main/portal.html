@@ -5267,6 +5267,7 @@ function loadEvents(noonDay, loadId) {
       var gate = parseSessionGate(txt, drift);
       if (dashSessionData && dashSessionData[idx]) {
         dashSessionData[idx].gate = gate;
+        dashSessionData[idx].eventsReady = txt !== null;
         /* No gating signal at all and less than one full 60 s record of
          * breathing data means the AS11 never delivered therapy (e.g. therapy
          * started then SmartStop fired seconds later).  It writes no files for
@@ -5355,6 +5356,126 @@ function spo2ColorHook(u) {
   if (curStroke != null) ctx.stroke();
   ctx.restore();
 }
+function viewportLeakAverage(xmin, xmax) {
+  var sum = 0, weight = 0;
+  for (var i = 0; i < dashSessionData.length; i++) {
+    var rec = dashSessionData[i], pld = rec && rec.pld;
+    if (!rec || rec.noTherapy || !pld || !pld.t || !pld.leak || pld.t.length < 2) continue;
+    var step = pld.t[1] - pld.t[0];
+    if (!(step > 0)) continue;
+    for (var j = 0; j < pld.t.length; j++) {
+      var t = pld.t[j], v = pld.leak[j];
+      if (v == null || !isFinite(v) || !isFinite(t)) continue;
+      var ms = Math.min(xmax, t + step) - Math.max(xmin, t);
+      if (ms > 0) { sum += v * ms; weight += ms; }
+    }
+  }
+  return weight > 0 ? sum / weight : null;
+}
+
+function viewportEventStats(xmin, xmax) {
+  if (!dashEventsLoaded || !(xmax > xmin)) return null;
+  var spans = [];
+  for (var i = 0; i < dashSessionData.length; i++) {
+    var rec = dashSessionData[i];
+    if (!rec || rec.noTherapy) continue;
+    var pld = rec.pld, session = dashSessions[i], gate = rec.gate;
+    var start = gate && gate.start != null ? gate.start : session && session.start_epoch_ms;
+    var end = gate && gate.end != null ? gate.end : session && session.end_epoch_ms;
+    if (!(pld && pld.t && pld.t.length >= 2)) {
+      if (end > xmin && start < xmax) return null;
+      continue;
+    }
+    var step = pld.t[1] - pld.t[0];
+    if (!(step > 0)) return null;
+    var samplesPerMinute = Math.max(1, Math.round(60000 / step));
+    var duration = Math.floor(pld.t.length / samplesPerMinute) * 60000;
+    var lo = Math.max(xmin, pld.t[0]);
+    var hi = Math.min(xmax, pld.t[0] + duration);
+    if (!(hi > lo)) continue;
+    if (!rec.eventsReady) return null;
+    spans.push([lo, hi]);
+  }
+  spans.sort(function(a, b) { return a[0] - b[0]; });
+  var merged = [];
+  spans.forEach(function(span) {
+    var last = merged[merged.length - 1];
+    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
+    else merged.push(span.slice());
+  });
+  var ms = 0, count = 0;
+  merged.forEach(function(span) { ms += span[1] - span[0]; });
+  if (!(ms > 0)) return null;
+  for (var k = 0; k < dashEvents.length; k++) {
+    var ev = dashEvents[k];
+    if (ev.code !== 'OA' && ev.code !== 'CA' && ev.code !== 'A' && ev.code !== 'H') continue;
+    if (merged.some(function(span) { return ev.t1 > span[0] && ev.t1 <= span[1]; })) count++;
+  }
+  return { ahi: count * 3600000 / ms, count: count, minutes: ms / 60000 };
+}
+
+function formatDuration(mins) {
+  if (mins >= 60) return (mins / 60).toFixed(1) + ' h';
+  if (mins < 1) return Math.round(mins * 60) + ' s';
+  return mins.toFixed(mins < 10 ? 1 : 0) + ' min';
+}
+
+function drawDashAvgLine(u, val, scaleKey) {
+  if (val == null || !isFinite(val)) return;
+  var left = u.bbox.left, top = u.bbox.top, wid = u.bbox.width, hgt = u.bbox.height;
+  var y = u.valToPos(val, scaleKey, true);
+  if (y < top || y > top + hgt) return;
+  var pr = u.pxRatio || 1;
+  var ctx = u.ctx;
+  ctx.save();
+  ctx.strokeStyle = cssVar('--text-muted');
+  ctx.lineWidth = Math.max(2, 2 * pr);
+  ctx.setLineDash([pr, 2 * pr]);
+  ctx.globalAlpha = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(left, y);
+  ctx.lineTo(left + wid, y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawDashLabel(u, text, color, pos) {
+  if (!text) return;
+  var ctx = u.ctx;
+  var left = u.bbox.left, top = u.bbox.top, wid = u.bbox.width, hgt = u.bbox.height;
+  var pr = u.pxRatio || 1;
+  var fpx = (window.innerWidth <= 600) ? 28 : 16;
+  var x = left + wid - 6;
+  var y = (pos === 'top-right') ? (top + 4) : (top + hgt - 4);
+  ctx.save();
+  ctx.font = Math.round(fpx * pr) + 'px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = (pos === 'top-right') ? 'top' : 'bottom';
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.lineWidth = (fpx >= 24 ? 5 : 3.5) * pr;
+  ctx.strokeStyle = cssVar('--card-bg');
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+function leakAverageHook(u) {
+  var avg = viewportLeakAverage(u.scales.x.min, u.scales.x.max);
+  if (avg == null) return;
+  drawDashAvgLine(u, avg, 'leak');
+  drawDashLabel(u, 'Avg ' + avg.toFixed(1) + ' L/min', cssVar('--color-leak'), 'bottom-right');
+}
+
+function ahiViewportHook(u) {
+  var stats = viewportEventStats(u.scales.x.min, u.scales.x.max);
+  if (!stats) return;
+  var detail = stats.count + (stats.count === 1 ? ' event' : ' events') + ' · ' + formatDuration(stats.minutes);
+  drawDashLabel(u, detail, cssVar('--text-muted'), 'top-right');
+  drawDashLabel(u, 'AHI ' + stats.ahi.toFixed(2) + ' /h', '#60a5fa', 'bottom-right');
+}
+
 /* uPlot draw hook for oximetry panels: draws a dashed horizontal line at the
  * average value across the current viewport, with a readable label.  The
  * average is computed from the raw oxData filtered to the visible x-range so
@@ -5379,31 +5500,9 @@ function oxiAverageHook(sigKey, unit) {
     }
     if (count === 0) return;
     var avg = sum / count;
-    var ctx = u.ctx;
-    var left = u.bbox.left, top = u.bbox.top, wid = u.bbox.width, hgt = u.bbox.height;
-    var y = u.valToPos(avg, sigKey, true);
-    if (y < top || y > top + hgt) return;
-    var pr = u.pxRatio || 1;
     var color = oxiAvgColors[sigKey] || '#2563eb';
-    var lineColor = cssVar('--text-muted');
-    ctx.save();
-    ctx.strokeStyle = lineColor;
-    ctx.lineWidth = Math.max(2, 2 * pr);
-    ctx.setLineDash([pr, 2 * pr]);
-    ctx.globalAlpha = 0.5;
-    ctx.beginPath();
-    ctx.moveTo(left, y);
-    ctx.lineTo(left + wid, y);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = color;
-    var fpx = (window.innerWidth <= 600) ? 28 : 16;
-    ctx.font = Math.round(fpx * pr) + 'px sans-serif';
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText('Avg ' + avg.toFixed(1) + unit, left + wid - 6, top + hgt - 4);
-    ctx.restore();
+    drawDashAvgLine(u, avg, sigKey);
+    drawDashLabel(u, 'Avg ' + avg.toFixed(1) + unit, color, 'bottom-right');
   };
 }
 /* uPlot draw hook for the Breathing panel: translucent band + rotated label
@@ -5880,13 +5979,13 @@ function makeDashPanel(sig, el, cur) {
     },
     legend: { show: false },
     hooks: {
-      draw: (sig.key === 'flow') ? [breathEventsHook]
-        : (sig.key === 'spo2') ? [spo2ColorHook]
+      draw: (sig.key === 'flow') ? [breathEventsHook, ahiViewportHook]
+        : (sig.key === 'leak') ? [leakAverageHook]
+        : (sig.key === 'spo2') ? [spo2ColorHook, oxiAverageHook('spo2', '%')]
+        : (sig.key === 'pulse') ? [oxiAverageHook('pulse', 'bpm')]
         : (sig.key === 'sleep') ? [hypnogramHook]
         : [],
-      drawAxes: (sig.key === 'spo2') ? [oxiAverageHook('spo2', '%')]
-        : (sig.key === 'pulse') ? [oxiAverageHook('pulse', 'bpm')]
-        : [],
+      drawAxes: [],
       ready: [function(u) { attachDashInteractions(u, el, sig); attachDashTooltip(u, el, sig); }],
       setScale: [function(u, key) {
         if (key !== 'x' || dashIsPanning || dashProgrammaticScale) return;
