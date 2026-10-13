@@ -80,6 +80,9 @@ static bool s_sd_ready;              /* SD card is mounted and log dir created *
 
 /* ── WebSocket Live Tail ──────────────────────────────────────────── */
 #define MAX_WS_CLIENTS 4
+/* Upper bound for a client control frame we will consume.  Frames larger
+ * than this close the connection instead of allocating without limit. */
+#define WS_CLIENT_FRAME_MAX 4096
 
 typedef struct {
     httpd_handle_t hd;
@@ -704,20 +707,59 @@ static esp_err_t logs_ws_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    /* Probe the frame header first, then consume the whole frame.
+     *
+     * Reading straight into a small stack buffer is unsafe: for a frame
+     * larger than the buffer httpd_ws_recv_frame() has already consumed the
+     * header and mask key when it returns ESP_ERR_INVALID_SIZE, leaving the
+     * payload unread.  The next read then interprets payload bytes as a
+     * frame header, so the socket desyncs and every subsequent frame is
+     * rejected ("WS frame is not properly masked") until the connection
+     * dies.  Client frames here are control messages of a few bytes, but the
+     * consume path must be correct for any size. */
     httpd_ws_frame_t ws_pkt;
-    uint8_t buf[32] = {0};
     memset(&ws_pkt, 0, sizeof(ws_pkt));
-    ws_pkt.payload = buf;
-    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
-
-    if (httpd_ws_recv_frame(req, &ws_pkt, sizeof(buf) - 1) != ESP_OK) {
+    if (httpd_ws_recv_frame(req, &ws_pkt, 0) != ESP_OK) {
+        ESP_LOGW(TAG, "ws: frame header read failed (fd=%d)",
+                 httpd_req_to_sockfd(req));
+        return ESP_FAIL;
+    }
+    if (ws_pkt.len == 0) {
+        if (ws_pkt.type == HTTPD_WS_TYPE_CLOSE) {
+            int fd = httpd_req_to_sockfd(req);
+            if (xSemaphoreTake(s_ws_mutex, 0) == pdTRUE) {
+                ws_remove_client_locked(fd);
+                xSemaphoreGive(s_ws_mutex);
+            }
+            ESP_LOGI(TAG, "ws: client closed connection (fd=%d)", fd);
+        }
+        return ESP_OK;
+    }
+    if (ws_pkt.len > WS_CLIENT_FRAME_MAX) {
+        ESP_LOGW(TAG, "ws: client frame too large (%u bytes, fd=%d) — closing",
+                 (unsigned)ws_pkt.len, httpd_req_to_sockfd(req));
         return ESP_FAIL;
     }
 
+    uint8_t stack_buf[32];
+    uint8_t *buf = stack_buf;
+    if (ws_pkt.len > sizeof(stack_buf) - 1) {
+        buf = heap_caps_malloc(ws_pkt.len + 1, MALLOC_CAP_SPIRAM);
+        if (!buf) buf = malloc(ws_pkt.len + 1);
+        if (!buf) return ESP_FAIL;
+    }
+    ws_pkt.payload = buf;
+    if (httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len) != ESP_OK) {
+        ESP_LOGW(TAG, "ws: frame payload read failed (%u bytes, fd=%d)",
+                 (unsigned)ws_pkt.len, httpd_req_to_sockfd(req));
+        if (buf != stack_buf) free(buf);
+        return ESP_FAIL;
+    }
+    buf[ws_pkt.len] = '\0';
+
     int req_fd = httpd_req_to_sockfd(req);
 
-    if (ws_pkt.type == HTTPD_WS_TYPE_TEXT && ws_pkt.len > 0) {
-        buf[ws_pkt.len] = '\0';
+    if (ws_pkt.type == HTTPD_WS_TYPE_TEXT) {
         if (strncmp((char *)buf, "pause", 5) == 0) {
             if (xSemaphoreTake(s_ws_mutex, 0) == pdTRUE) {
                 for (int i = 0; i < s_ws_client_count; i++) {
@@ -741,13 +783,8 @@ static esp_err_t logs_ws_handler(httpd_req_t *req)
             /* Defer the status push to the forwarder task (single-writer model). */
             s_push_status_now = true;
         }
-    } else if (ws_pkt.type == HTTPD_WS_TYPE_CLOSE) {
-        if (xSemaphoreTake(s_ws_mutex, 0) == pdTRUE) {
-            ws_remove_client_locked(req_fd);
-            xSemaphoreGive(s_ws_mutex);
-        }
-        ESP_LOGI(TAG, "ws: client closed connection (fd=%d)", req_fd);
     }
+    if (buf != stack_buf) free(buf);
     return ESP_OK;
 }
 

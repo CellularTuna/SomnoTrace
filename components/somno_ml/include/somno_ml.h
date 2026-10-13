@@ -103,6 +103,7 @@ int somno_ml_enqueue(const somno_ml_job_t *job);
 /* Convenience enqueue helpers for the two source types. */
 int somno_ml_enqueue_ring(const char *recording_id);
 int somno_ml_enqueue_as11(const char *day_dir, const char *file_prefix);
+void somno_ml_set_as11_active(const char *day_dir, const char *file_prefix, bool active);
 
 /* Synchronous scoring (used by worker internally; exposed for tests).
  * Reads the source file, runs the causal pipeline, writes <sst_path> via

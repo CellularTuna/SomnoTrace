@@ -39,6 +39,7 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "psram_task.h"
+#include "http_query.h"
 
 static const char *TAG = "session_graph";
 
@@ -84,22 +85,7 @@ typedef struct __attribute__((packed)) {
 /* URL-decode a query parameter value.  Returns decoded length or -1 on overflow. */
 static int graph_url_decode(char *dst, const char *src, int max_len)
 {
-    int i = 0;
-    while (*src && i < max_len - 1) {
-        if (*src == '%' && isxdigit((unsigned char)src[1]) && isxdigit((unsigned char)src[2])) {
-            char hex[3] = { src[1], src[2], '\0' };
-            dst[i++] = (char)strtol(hex, NULL, 16);
-            src += 3;
-        } else if (*src == '+') {
-            dst[i++] = ' ';
-            src++;
-        } else {
-            dst[i++] = *src++;
-        }
-    }
-    if (i >= max_len) return -1;
-    dst[i] = '\0';
-    return i;
+    return http_query_decode(dst, src, max_len);
 }
 
 /* Extract a query parameter from the request.
@@ -119,7 +105,7 @@ static bool get_qparam(httpd_req_t *req, const char *key, char *out, int out_len
     /* First try the official API */
     char qbuf[512];
     int qlen = httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf));
-    if (qlen > 0) {
+    if (qlen == ESP_OK) {
         char key_eq[48];
         snprintf(key_eq, sizeof(key_eq), "%s=", key);
         char *p = qbuf;
@@ -133,8 +119,9 @@ static bool get_qparam(httpd_req_t *req, const char *key, char *out, int out_len
             char *end = strchr(p, '&');
             int vlen = end ? (int)(end - p) : (int)strlen(p);
             if (vlen >= 1 && vlen < out_len) {
-                graph_url_decode(out, p, out_len);
-                return true;
+                memcpy(out, p, vlen);
+                out[vlen] = '\0';
+                return graph_url_decode(out, out, out_len) > 0;
             }
             break;
         }
@@ -153,8 +140,7 @@ static bool get_qparam(httpd_req_t *req, const char *key, char *out, int out_len
                     if (vlen >= 1 && vlen < out_len) {
                         memcpy(out, p + klen + 1, vlen);
                         out[vlen] = '\0';
-                        graph_url_decode(out, out, out_len);
-                        return true;
+                        return graph_url_decode(out, out, out_len) > 0;
                     }
                 }
                 if (!next_amp) break;

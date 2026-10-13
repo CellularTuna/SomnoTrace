@@ -29,6 +29,17 @@
 typedef int      BaseType_t;
 typedef uint32_t TickType_t;
 typedef int      portMUX_TYPE;
+typedef uint32_t UBaseType_t;
+typedef uint8_t StackType_t;
+typedef struct { unsigned dummy; } StaticTask_t;
+
+#define pdTRUE 1
+#define pdFALSE 0
+#define pdPASS 1
+#define tskIDLE_PRIORITY 0
+#define pdMS_TO_TICKS(ms) ((TickType_t)(ms))
+#define portENTER_CRITICAL(mux) ((void)(mux))
+#define portEXIT_CRITICAL(mux) ((void)(mux))
 
 #define portMAX_DELAY               ((TickType_t)0xffffffffu)
 #define portMUX_INITIALIZER_UNLOCKED 0

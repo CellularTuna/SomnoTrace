@@ -42,6 +42,7 @@ cd "$(dirname "$0")/.." || exit 1
 
 MAIN_DIR=${MAIN_DIR:-main}
 UPLOADER_DIR=${UPLOADER_DIR:-components/uploader}
+SOMNO_DIR=${SOMNO_DIR:-components/somno_ml}
 OUT=${OUT:-build/host_tests}
 ONLY=""
 QUIET=0
@@ -156,6 +157,8 @@ run_test legacy_file_list_test -I"$SHIM" -I"$MAIN_DIR" scripts/legacy_file_list_
 run_test upload_park_test -I"$UPLOADER_DIR" scripts/upload_park_test.c
 run_test as11_reconnect_test -I"$SHIM" -I"$MAIN_DIR" scripts/as11_reconnect_test.c "$MAIN_DIR/as11_reconnect.c"
 run_test as11_adv_test       -I"$SHIM" -I"$MAIN_DIR" scripts/as11_adv_test.c "$MAIN_DIR/as11_adv.c"
+run_test http_query_test     -I"$SHIM" -I"$MAIN_DIR" scripts/http_query_test.c "$MAIN_DIR/http_query.c" \
+    scripts/test_include/httpd_query_shim.c
 
 # Web password core (PBKDF2, session tokens, Basic/Origin parsing, rate
 # limiter).  Links the system mbedTLS: apt install libmbedtls-dev.
@@ -192,6 +195,11 @@ if [ -n "$CJ_INC" ]; then
         '-DUPLOAD_STATE_DIR="/tmp/somnotrace_oxt/ustate"' \
         scripts/upload_ox_test.c "$UPLOADER_DIR/upload_ox.c" $CJ_SRC $CJ_LIB
     run_check mqtt_live_contract_test python3 scripts/mqtt_live_contract_test.py
+    run_test somno_worker_test $CJ_INC -I"$SHIM" -I"$MAIN_DIR" -I"$SOMNO_DIR" \
+        -I"$SOMNO_DIR/include" -ffunction-sections -fdata-sections \
+        scripts/somno_worker_test.c "$SOMNO_DIR/somno_ml_features.c" \
+        -Wl,--gc-sections -Wl,--wrap=somno_feat_create -Wl,--wrap=somno_feat_destroy \
+        $CJ_SRC $CJ_LIB -lm
 fi
 
 # The mutation harness's TEXTUAL layer has nothing else to catch a mistake in it. Every

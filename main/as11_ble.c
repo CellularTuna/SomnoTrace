@@ -188,6 +188,15 @@ static UBaseType_t s_notif_hwm = 0;
 static uint32_t    s_notif_dropped = 0;
 static uint32_t    s_notif_dropped_bytes = 0;
 static uint32_t    s_notif_alloc_fail = 0;
+/* Connection-scoped reception forensics: these discriminate "the AS11
+ * stopped transmitting" (silence before the supervision timeout) from "our
+ * radio starved" (steady traffic with a sudden stop).  Bounded counters and
+ * one timestamp, reset on every new connection. */
+static int64_t  s_notif_last_rx_us = 0;
+static uint32_t s_notif_rx_total = 0;
+static uint32_t s_notif_gap_events = 0;
+static int64_t  s_notif_last_gap_us = 0;
+#define NOTIF_GAP_THRESHOLD_US (500LL * 1000)
 static TaskHandle_t  s_notif_task  = NULL;
 
 /* ── Spool fragment collector ────────────────────────────────────────
@@ -1178,6 +1187,11 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_manual_disconnect = false;
             s_supv_update_sent = false;   /* per-connection Phase-D attempt */
             s_supv_tmo_context_pending = false;
+            /* Fresh reception counters for this connection. */
+            s_notif_last_rx_us = 0;
+            s_notif_rx_total = 0;
+            s_notif_gap_events = 0;
+            s_notif_last_gap_us = 0;
         }
         xSemaphoreGive(s_connect_sem);
         return 0;
@@ -1284,6 +1298,18 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_NOTIFY_RX: {
         uint16_t notif_len = OS_MBUF_PKTLEN(event->notify_rx.om);
         ESP_LOGD(TAG, "Notification RX: handle=%d len=%d", event->notify_rx.attr_handle, notif_len);
+        /* Reception forensics: only the timestamp and counters live here, so
+         * the cost is two reads per notification. */
+        {
+            int64_t now_us = esp_timer_get_time();
+            if (s_notif_last_rx_us != 0 &&
+                now_us - s_notif_last_rx_us > NOTIF_GAP_THRESHOLD_US) {
+                s_notif_gap_events++;
+                s_notif_last_gap_us = now_us;
+            }
+            s_notif_last_rx_us = now_us;
+            s_notif_rx_total++;
+        }
         if (notif_len > 0 && s_notif_queue) {
             /* Queue-depth metrics.  Each element owns a separately malloc'd
              * payload, so depth translates into a real worst-case backlog —
@@ -2759,8 +2785,18 @@ static void log_disconnect_context(void)
     int64_t sess_age_s = have_sess ?
         (((int64_t)time(NULL) * 1000 - sess_start) / 1000) : -1;
 
+    /* Reception forensics — see the counters' declaration.  silence_ms is
+     * how long the link had already been quiet when the supervision timeout
+     * fired; a value near the 3 s timeout means the AS11 stopped sending
+     * first, while a small value with steady gaps points at radio contention. */
+    int64_t now_us = esp_timer_get_time();
+    int64_t silence_ms = s_notif_last_rx_us ? (now_us - s_notif_last_rx_us) / 1000 : -1;
+    int64_t last_gap_ms = s_notif_last_gap_us ? (now_us - s_notif_last_gap_us) / 1000 : -1;
+
     ESP_LOGW(TAG, "520-context: wifi=%s rssi=%d ch=%u o2=%s upload=%d "
-             "post_active=%d session=%s (age=%llds) heap_int=%u heap_min=%u",
+             "post_active=%d session=%s (age=%llds) heap_int=%u heap_min=%u "
+             "rx=%u gaps=%u silence_ms=%lld last_gap_ms=%lld "
+             "q_hwm=%u q_drop=%u q_drop_bytes=%u alloc_fail=%u",
              link.up ? "up" : "down",
              link.up ? (int)ap_rssi : link.rssi,
              channel,
@@ -2770,7 +2806,15 @@ static void log_disconnect_context(void)
              have_sess ? "active" : "none",
              (long long)sess_age_s,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)s_notif_rx_total,
+             (unsigned)s_notif_gap_events,
+             (long long)silence_ms,
+             (long long)last_gap_ms,
+             (unsigned)s_notif_hwm,
+             (unsigned)s_notif_dropped,
+             (unsigned)s_notif_dropped_bytes,
+             (unsigned)s_notif_alloc_fail);
 }
 
 /* ------------------------------------------------------------------

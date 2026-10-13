@@ -1000,6 +1000,7 @@ static void storage_finalize(session_writer_t *s, const sw_cmd_t *cmd)
     const char *state = cmd->state;
     if (s->storage_failed) state = "storage_failed";
     write_manifest(s, state);
+    somno_ml_set_as11_active(s->dir, s->session_id, false);
 
     ESP_LOGI(TAG, "=== SESSION STOPPED: %s (%s) ===", s->session_id, state);
     ESP_LOGI(TAG, "flow=%u press=%u sa2=%u pld=%u total samples",
@@ -1714,6 +1715,7 @@ session_writer_t *session_writer_start(void)
     char noon_day[16];
     as11_time_noon_day(s->start_epoch_ms - drift_ms, noon_day, sizeof(noon_day));
     snprintf(s->dir, sizeof(s->dir), "%s/%s", SD_STREAMS_DIR, noon_day);
+    somno_ml_set_as11_active(s->dir, s->session_id, true);
 
     s->active = true;
     /* Declare the recording so destructive maintenance actions are refused
@@ -1736,6 +1738,7 @@ session_writer_t *session_writer_start(void)
         if (s_active == s) s_active = NULL;
         xSemaphoreGive(s_active_mutex);
         s->active = false;
+        somno_ml_set_as11_active(s->dir, s->session_id, false);
         sd_storage_recording_end();
         batch_pool_destroy(s);
         vSemaphoreDelete(s->fill_mutex);

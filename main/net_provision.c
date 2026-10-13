@@ -63,6 +63,7 @@
 #include "esp_http_server.h"
 #include "nvs_writer.h"
 #include "web_auth.h"
+#include "http_query.h"
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -1940,49 +1941,15 @@ static bool path_is_safe(const char *path)
 /* URL-decode a query parameter value in-place */
 static int fs_url_decode(char *dst, const char *src, int max_len)
 {
-    int i = 0;
-    while (*src && i < max_len - 1) {
-        if (*src == '%' && src[1] && src[2]) {
-            int hi = src[1] >= 'A' ? (src[1] | 0x20) - 'a' + 10 : src[1] - '0';
-            int lo = src[2] >= 'A' ? (src[2] | 0x20) - 'a' + 10 : src[2] - '0';
-            dst[i++] = (char)((hi << 4) | lo);
-            src += 3;
-        } else if (*src == '+') {
-            dst[i++] = ' ';
-            src++;
-        } else {
-            dst[i++] = *src++;
-        }
-    }
-    dst[i] = '\0';
-    return i;
+    return http_query_decode(dst, src, max_len);
 }
 
 /* Extract a query parameter from the URI query string */
 static bool get_query_param(httpd_req_t *req, const char *key, char *out, int out_len)
 {
-    char buf[512];
-    int len = httpd_req_get_url_query_str(req, buf, sizeof(buf));
-    if (len <= 0) return false;
-
-    char key_eq[32];
-    snprintf(key_eq, sizeof(key_eq), "%s=", key);
-
-    char *p = strstr(buf, key_eq);
-    if (!p) return false;
-    p += strlen(key_eq);
-
-    char *end = strchr(p, '&');
-    int val_len = end ? (int)(end - p) : (int)strlen(p);
-    if (val_len <= 0) return false;
-
-    char raw[256];
-    if (val_len >= (int)sizeof(raw)) val_len = sizeof(raw) - 1;
-    memcpy(raw, p, val_len);
-    raw[val_len] = '\0';
-
-    fs_url_decode(out, raw, out_len);
-    return true;
+    char raw[512];
+    if (!http_query_read_encoded(req, key, raw, sizeof(raw))) return false;
+    return fs_url_decode(out, raw, out_len) > 0;
 }
 
 static esp_err_t dir_get_handler(httpd_req_t *req)

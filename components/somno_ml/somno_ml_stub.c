@@ -54,6 +54,13 @@ int somno_ml_enqueue_as11(const char *day_dir, const char *file_prefix)
     return -1;
 }
 
+void somno_ml_set_as11_active(const char *day_dir, const char *file_prefix, bool active)
+{
+    (void)day_dir;
+    (void)file_prefix;
+    (void)active;
+}
+
 int somno_ml_score_file(const somno_ml_job_t *job)
 {
     (void)job;

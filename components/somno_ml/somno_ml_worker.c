@@ -59,6 +59,7 @@ static const char *TAG = "somno_ml";
 
 #define MIN_VALID_EPOCHS 30
 #define JOB_QUEUE_LEN    8
+#define SOMNO_WORKER_STACK_BYTES (24 * 1024)
 /* Ring-off gaps shorter than this still belong to the same night: the ring
  * records per wear-session, so toilet breaks split one night into fragments.
  * Scoring each fragment alone restarts the REM-latency gate and loses the
@@ -107,6 +108,35 @@ static int64_t s_next_recon_ms = -1;
 static int64_t s_next_full_ms  = -1;
 static somno_ml_live_state_t s_live;
 static portMUX_TYPE s_live_mux = portMUX_INITIALIZER_UNLOCKED;
+static somno_ml_job_t s_as11_active;
+static bool s_as11_recording;
+static portMUX_TYPE s_as11_mux = portMUX_INITIALIZER_UNLOCKED;
+
+void somno_ml_set_as11_active(const char *dir, const char *id, bool active)
+{
+    if (!dir || !id) return;
+    somno_ml_job_t job = { .type = SOMNO_ML_SRC_AS11_SA2 };
+    if (strlen(dir) >= sizeof(job.dir) || strlen(id) >= sizeof(job.id)) return;
+    strlcpy(job.dir, dir, sizeof(job.dir));
+    strlcpy(job.id, id, sizeof(job.id));
+    portENTER_CRITICAL(&s_as11_mux);
+    if (active) {
+        s_as11_active = job;
+        s_as11_recording = true;
+    } else if (strcmp(s_as11_active.dir, dir) == 0 && strcmp(s_as11_active.id, id) == 0) {
+        s_as11_recording = false;
+    }
+    portEXIT_CRITICAL(&s_as11_mux);
+}
+
+static bool as11_is_recording(const char *dir, const char *id)
+{
+    portENTER_CRITICAL(&s_as11_mux);
+    bool active = s_as11_recording && strcmp(s_as11_active.dir, dir) == 0 &&
+                  strcmp(s_as11_active.id, id) == 0;
+    portEXIT_CRITICAL(&s_as11_mux);
+    return active;
+}
 
 static uint32_t rd_u32(const uint8_t *p)
 {
@@ -724,6 +754,7 @@ static int collect_ring_recs(ring_rec_t *out, int cap)
  * grp[] must be sorted by start_ms and share < FRAG_MERGE_GAP_MS gaps. */
 static int score_ring_group(const ring_rec_t *grp, int nmem, const char *job_id)
 {
+    if (!grp || nmem < 1 || nmem > MAX_FRAG_GROUP) return -1;
     vitals_meta_t metas[MAX_FRAG_GROUP];
     char ssts[MAX_FRAG_GROUP][340];
     FILE *fs[MAX_FRAG_GROUP] = {0};
@@ -756,17 +787,6 @@ static int score_ring_group(const ring_rec_t *grp, int nmem, const char *job_id)
                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!ctx.fused) ctx.fused = malloc(ctx.cap_epochs * 4 * sizeof(double));
     if (!ctx.fused) { somno_feat_destroy(ctx.fe); ctx.fe = NULL; goto solo; }
-
-    ctx.fe = somno_feat_create(metas[0].dt, 1);
-    if (!ctx.fe) goto solo;
-    ctx.cap_epochs = 2;
-    for (int k = 0; k < nmem; k++)
-        ctx.cap_epochs += metas[k].sample_count /
-                          (uint32_t)lrint(30.0 / metas[k].dt) + 2;
-    ctx.fused = heap_caps_malloc(ctx.cap_epochs * 4 * sizeof(double),
-                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!ctx.fused) ctx.fused = malloc(ctx.cap_epochs * 4 * sizeof(double));
-    if (!ctx.fused) { somno_feat_destroy(ctx.fe); goto solo; }
 
     uint32_t bounds[MAX_FRAG_GROUP + 1];
     bounds[0] = 0;
@@ -928,6 +948,7 @@ static int score_sa2(const char *sa2_path, const char *sst_path,
 int somno_ml_score_file(const somno_ml_job_t *job)
 {
     if (!somno_ml_available() || !job) return -1;
+    if (job->type == SOMNO_ML_SRC_AS11_SA2 && as11_is_recording(job->dir, job->id)) return 0;
     char src[320], sst[320];
     int rc;
     if (job->type == SOMNO_ML_SRC_RING_VITALS)
@@ -1031,7 +1052,9 @@ static void reconcile_as11(const char *cutoff)
             if (de->d_name[i] < '0' || de->d_name[i] > '9') { digits = 0; break; }
         if (!digits) continue;
         char day[256];
-        snprintf(day, sizeof(day), "%s/%s", SD_STREAMS, de->d_name);
+        if (snprintf(day, sizeof(day), "%s/%s", SD_STREAMS, de->d_name) >=
+                (int)sizeof(day))
+            continue;
         DIR *dd = opendir(day);
         if (!dd) continue;
         struct dirent *fe;
@@ -1044,6 +1067,7 @@ static void reconcile_as11(const char *cutoff)
             if (pl >= sizeof(prefix)) continue;
             memcpy(prefix, fe->d_name, pl);
             prefix[pl] = '\0';
+            if (as11_is_recording(day, prefix)) continue;
             char sst[400], sa2[400];
             if (snprintf(sst, sizeof(sst), "%s/%s_stages.sst", day, prefix) >=
                     (int)sizeof(sst) ||
@@ -1234,13 +1258,13 @@ void somno_ml_worker_start(void)
     /* PSRAM stack — internal RAM is too scarce for a 16 KB worker stack. */
     static StackType_t *s_stack;
     static StaticTask_t *s_tcb;
-    s_stack = heap_caps_malloc(16384, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_stack = heap_caps_malloc(SOMNO_WORKER_STACK_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_tcb = heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!s_stack || !s_tcb) {
         ESP_LOGE(TAG, "worker stack alloc failed");
         return;
     }
-    xTaskCreateStaticPinnedToCore(worker_task, "somno_ml", 16384, NULL,
+    xTaskCreateStaticPinnedToCore(worker_task, "somno_ml", SOMNO_WORKER_STACK_BYTES, NULL,
                                   tskIDLE_PRIORITY + 1, s_stack, s_tcb, 1);
     ESP_LOGI(TAG, "worker started (PSRAM stack)");
 }
