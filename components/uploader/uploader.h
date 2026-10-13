@@ -160,6 +160,10 @@ struct uploader_config_s {
     bool aer_enabled;        /* toggle: include Aerivue in upload cycle     */
     char aer_key[64];        /* upload key ("avu_…"), scoped + revocable    */
 
+    /* BreathingRoom */
+    bool br_enabled;         /* toggle: include BreathingRoom in the cycle  */
+    char br_key[80];         /* personal access token ("slp_" + 64 chars)   */
+
     /* Built-in FTP server */
     bool ftp_enabled;        /* toggle: start FTP server at boot            */
     bool ftp_anonymous;      /* true = anonymous, false = user/pass auth    */
@@ -248,9 +252,11 @@ void uploader_set_progress_notify_fn(uploader_progress_notify_fn_t fn);
 bool uploader_is_smb_configured(void);
 bool uploader_is_sleephq_configured(void);
 bool uploader_is_aerivue_configured(void);
+bool uploader_is_breathingroom_configured(void);
 bool uploader_is_smb_enabled(void);
 bool uploader_is_sleephq_enabled(void);
 bool uploader_is_aerivue_enabled(void);
+bool uploader_is_breathingroom_enabled(void);
 
 /* Check if FTP server is enabled in config. */
 bool uploader_is_ftp_enabled(void);

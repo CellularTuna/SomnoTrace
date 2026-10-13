@@ -179,6 +179,8 @@ else
     skip_test edf_gen_test "no cJSON (apt install libcjson-dev, or set CJSON_DIR=<dir with cJSON.c/.h>)"
     skip_test edf_properties_test "no cJSON"
     skip_test upload_ox_test "no cJSON"
+    skip_test br_parse_test "no cJSON"
+    skip_test br_backend_test "no cJSON"
     skip_test mqtt_live_contract_test "no cJSON"
 fi
 if [ -n "$CJ_INC" ]; then
@@ -194,6 +196,12 @@ if [ -n "$CJ_INC" ]; then
         '-DSD_MOUNT_POINT="/tmp/somnotrace_oxt/sd"' \
         '-DUPLOAD_STATE_DIR="/tmp/somnotrace_oxt/ustate"' \
         scripts/upload_ox_test.c "$UPLOADER_DIR/upload_ox.c" $CJ_SRC $CJ_LIB
+    # BreathingRoom response parsing: per-file results must never become
+    # request-level errors, replaced counts as imported, deferred is surfaced.
+    run_test br_parse_test $CJ_INC -I"$UPLOADER_DIR" \
+        scripts/br_parse_test.c "$UPLOADER_DIR/br_parse.c" $CJ_SRC $CJ_LIB
+    run_test br_backend_test $CJ_INC -I"$SHIM" -I"$UPLOADER_DIR" \
+        scripts/br_backend_test.c "$UPLOADER_DIR/br_parse.c" $CJ_SRC $CJ_LIB
     run_check mqtt_live_contract_test python3 scripts/mqtt_live_contract_test.py
     run_test somno_worker_test $CJ_INC -I"$SHIM" -I"$MAIN_DIR" -I"$SOMNO_DIR" \
         -I"$SOMNO_DIR/include" -ffunction-sections -fdata-sections \
@@ -208,6 +216,8 @@ fi
 # passes, which is precisely how operators inside trailing comments produced survivors that
 # no test could ever kill. Needs no compiler, so it runs wherever python3 does.
 if command -v python3 >/dev/null 2>&1; then
+    run_check upload_http_contract_test env SNT_TEST_SANITIZE="$SANITIZE" \
+        python3 scripts/upload_http_contract_test.py
     run_check mutate_host_self_test python3 scripts/mutate_host.py --self-test
     # In-process SleepHQ contract check (no network): the capture-hold gate
     # must keep a split night's fragments together in one incremental import

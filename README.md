@@ -283,6 +283,7 @@ OSCAR takes a session's extent from the recording files themselves, not from the
 | **Standard EDF File Creation** | ✅ Implemented | Generates standard `STR.edf`, `BRP.edf`, `PLD.edf`, `EVE.edf`, and `CSL.edf` files compatible with OSCAR and SleepHQ. |
 | **SMB / NAS Network Upload** | ✅ Implemented | Direct file transfer to Windows, macOS, and Linux/Samba shared folders. |
 | **SleepHQ Cloud Upload** | ✅ Implemented | Direct HTTPS upload to SleepHQ with fast retry handling. |
+| **BreathingRoom Cloud Upload** | ✅ Implemented | HTTPS upload of CPAP sessions and oximetry recordings with a personal access token (oximetry requires a BreathingRoom Premium account). |
 | **Web Dashboard & Mobile UI** | ✅ Implemented | Interactive sleep charts, AHI breakdown, status telemetry, and easy setup. |
 | **LCD & Audio Alert System** | ✅ Implemented | Bedside color screen, live flow graph, and speaker alert sounds. |
 | **Sub-Second NTP Clock Sync** | ✅ Implemented | Internet time sync eliminating AirSense 11 clock drift for pulse oximeter alignment. |

@@ -589,3 +589,222 @@ int uph_put_file(esp_tls_t *tls, const char *host, const char *req_path,
              (unsigned)file_size, md5_hex);
     return status;
 }
+
+/* ── Multi-file multipart upload (BreathingRoom layout) ───────────────
+ *
+ * Same streaming discipline as uph_put_file(): Content-Length computed
+ * up front, file bodies read straight off the SD card in UPH_READ_CHUNK
+ * pieces, one scratch buffer total. Differences: a repeated `files` part
+ * per file carrying only the basename, an optional leading text part, and
+ * no content_hash field (the API keys recordings on source + start time,
+ * not a client hash). */
+static const char *uph_multipart_name(const char *path, const char *filename)
+{
+    if (!path) return NULL;
+    const char *base = filename ? filename : strrchr(path, '/');
+    if (!filename) base = base ? base + 1 : path;
+    if (!base[0] || strpbrk(base, "/\\\"\r\n")) return NULL;
+    return base;
+}
+
+int uph_put_files_named(esp_tls_t *tls, const char *host, const char *req_path,
+                        const char *bearer, const char *accept,
+                        const char *const *local_paths, int n_paths,
+                        const char *const *filenames,
+                        const char *extra_field, const char *extra_value,
+                        char **resp_body_out, size_t resp_cap, bool *peer_close)
+{
+    if (resp_body_out) *resp_body_out = NULL;
+    if (peer_close) *peer_close = false;
+    /* n_paths == 0 is legal: it sends a bare multipart body (just the
+     * closing boundary, plus the text part if given). The backends use it
+     * as a write-capability probe — the API answers 400 "No files
+     * provided" on an authenticated request. */
+    if (n_paths < 0 || (n_paths > 0 && !local_paths)) return -1;
+
+    char boundary[48];
+    snprintf(boundary, sizeof(boundary), "----ESP32%08X", (unsigned)esp_random());
+
+    /* Pass 1: size the body exactly. Per file: part header + bytes + CRLF. */
+    size_t total_body_len = 0;
+    if (extra_field && extra_value) {
+        char tf[256];
+        int n = snprintf(tf, sizeof(tf),
+            "--%s\r\n"
+            "Content-Disposition: form-data; name=\"%s\"\r\n\r\n"
+            "%s\r\n",
+            boundary, extra_field, extra_value);
+        if (n <= 0 || n >= (int)sizeof(tf)) return -1;
+        total_body_len += (size_t)n;
+    }
+    for (int i = 0; i < n_paths; i++) {
+        const char *base = uph_multipart_name(local_paths[i],
+                                              filenames ? filenames[i] : NULL);
+        if (!base) return -1;
+        struct stat st;
+        if (stat(local_paths[i], &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+            ESP_LOGW(TAG, "  cannot stat %s", local_paths[i]);
+            return -1;
+        }
+        char part_hdr[512];
+        int n = snprintf(part_hdr, sizeof(part_hdr),
+            "--%s\r\n"
+            "Content-Disposition: form-data; name=\"files\"; filename=\"%s\"\r\n"
+            "Content-Type: application/octet-stream\r\n\r\n",
+            boundary, base);
+        if (n <= 0 || n >= (int)sizeof(part_hdr)) return -1;
+        total_body_len += (size_t)n + (size_t)st.st_size + 2 /* trailing CRLF */;
+    }
+    char closing[64];
+    int closing_len = snprintf(closing, sizeof(closing), "--%s--\r\n", boundary);
+    if (closing_len <= 0 || closing_len >= (int)sizeof(closing)) return -1;
+    total_body_len += (size_t)closing_len;
+
+    /* Request headers */
+    char req_hdr[1024];
+    int hdr_pos = snprintf(req_hdr, sizeof(req_hdr),
+        "POST %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Authorization: Bearer %s\r\n"
+        "Accept: %s\r\n"
+        "Content-Type: multipart/form-data; boundary=%s\r\n"
+        "Content-Length: %u\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n",
+        req_path, host, bearer ? bearer : "",
+        accept ? accept : "application/json",
+        boundary, (unsigned)total_body_len);
+    if (hdr_pos <= 0 || hdr_pos >= (int)sizeof(req_hdr)) {
+        ESP_LOGE(TAG, "  request header too long");
+        return -1;
+    }
+    if (uph_write_all(tls, req_hdr, hdr_pos) < 0) {
+        if (peer_close) *peer_close = true;
+        return -1;
+    }
+
+    /* Optional leading text part */
+    if (extra_field && extra_value) {
+        char tf[256];
+        int n = snprintf(tf, sizeof(tf),
+            "--%s\r\n"
+            "Content-Disposition: form-data; name=\"%s\"\r\n\r\n"
+            "%s\r\n",
+            boundary, extra_field, extra_value);
+        if (n <= 0 || uph_write_all(tls, tf, (size_t)n) < 0) {
+            if (peer_close) *peer_close = true;
+            return -1;
+        }
+    }
+
+    uint8_t *chunk = heap_caps_malloc(UPH_READ_CHUNK, MALLOC_CAP_SPIRAM);
+    if (!chunk) chunk = malloc(UPH_READ_CHUNK);
+    if (!chunk) {
+        if (peer_close) *peer_close = true;
+        return -1;
+    }
+
+    /* Pass 2: stream every file */
+    int n_sent = 0;
+    for (int i = 0; i < n_paths; i++) {
+        const char *base = uph_multipart_name(local_paths[i],
+                                              filenames ? filenames[i] : NULL);
+        if (!base) {
+            free(chunk);
+            if (peer_close) *peer_close = true;
+            return -1;
+        }
+
+        FILE *f = fopen(local_paths[i], "rb");
+        if (!f) {
+            ESP_LOGW(TAG, "  cannot open %s mid-upload", local_paths[i]);
+            /* The request is already committed on the wire — the socket is
+             * desynced and the server will see a truncated body. */
+            free(chunk);
+            if (peer_close) *peer_close = true;
+            return -1;
+        }
+        fseek(f, 0, SEEK_END);
+        size_t file_size = (size_t)ftell(f);
+        fseek(f, 0, SEEK_SET);
+
+        char part_hdr[512];
+        int n = snprintf(part_hdr, sizeof(part_hdr),
+            "--%s\r\n"
+            "Content-Disposition: form-data; name=\"files\"; filename=\"%s\"\r\n"
+            "Content-Type: application/octet-stream\r\n\r\n",
+            boundary, base);
+        if (n <= 0 || uph_write_all(tls, part_hdr, (size_t)n) < 0) {
+            fclose(f);
+            free(chunk);
+            if (peer_close) *peer_close = true;
+            return -1;
+        }
+
+        size_t sent = 0;
+        bool io_fail = false;
+        while (sent < file_size) {
+            size_t to_read = UPH_READ_CHUNK;
+            if (to_read > file_size - sent) to_read = file_size - sent;
+            size_t nread = fread(chunk, 1, to_read, f);
+            if (nread == 0) {
+                ESP_LOGE(TAG, "  short read for %s at offset %u",
+                         base, (unsigned)sent);
+                io_fail = true;
+                break;
+            }
+            if (uph_write_all(tls, chunk, nread) < 0) {
+                ESP_LOGE(TAG, "  TLS write failed for %s at offset %u",
+                         base, (unsigned)sent);
+                io_fail = true;
+                break;
+            }
+            sent += nread;
+            if (sent % (UPH_READ_CHUNK * 4) == 0) taskYIELD();
+        }
+        fclose(f);
+        if (io_fail) {
+            free(chunk);
+            if (peer_close) *peer_close = true;
+            return -1;
+        }
+        if (uph_write_all(tls, "\r\n", 2) < 0) {
+            free(chunk);
+            if (peer_close) *peer_close = true;
+            return -1;
+        }
+        n_sent++;
+    }
+    free(chunk);
+
+    if (uph_write_all(tls, closing, (size_t)closing_len) < 0) {
+        if (peer_close) *peer_close = true;
+        return -1;
+    }
+
+    size_t body_cap = resp_cap > 0 ? resp_cap : 4096;
+    int status = uph_read_response(tls, 8192 + body_cap, body_cap,
+                                   resp_body_out, NULL, peer_close);
+    if (status < 200 || status >= 300) {
+        /* A zero-file request is a capability probe — the HTTP status IS
+         * the answer the caller wants (e.g. BreathingRoom expects 400
+         * "No files provided" from a writable token), not a failure. */
+        ESP_LOG_LEVEL(n_sent == 0 ? ESP_LOG_INFO : ESP_LOG_WARN, TAG,
+                      "  multi-file upload HTTP %d (%d file(s))",
+                      status, n_sent);
+        return status;
+    }
+    ESP_LOGI(TAG, "  uploaded %d file(s)", n_sent);
+    return status;
+}
+
+int uph_put_files(esp_tls_t *tls, const char *host, const char *req_path,
+                  const char *bearer, const char *accept,
+                  const char *const *local_paths, int n_paths,
+                  const char *extra_field, const char *extra_value,
+                  char **resp_body_out, size_t resp_cap, bool *peer_close)
+{
+    return uph_put_files_named(tls, host, req_path, bearer, accept,
+                               local_paths, n_paths, NULL, extra_field, extra_value,
+                               resp_body_out, resp_cap, peer_close);
+}

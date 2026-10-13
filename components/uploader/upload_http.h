@@ -112,3 +112,30 @@ int uph_put_file(esp_tls_t *tls, const char *host, const char *req_path,
                  const char *local_path, const char *remote_subpath,
                  const char *filename, uph_md5_mode_t md5_mode,
                  char **resp_body_out, size_t resp_cap, bool *peer_close);
+
+/* Stream N local files as ONE multipart/form-data POST using a repeated
+ * `files` part per file — BreathingRoom's layout:
+ *
+ *   files=<file bytes>;filename="<basename>"   (repeated per file)
+ *   vendor=resmed                               (optional leading text part)
+ *
+ * Only basenames are sent (strrchr(path,'/')+1); no content_hash. Files are
+ * stat()ed up front for Content-Length — there is no chunked fallback, the
+ * request carries an exact length. `extra_field`/`extra_value` (both NULL or
+ * both set) adds one leading text part. n_paths may be 0 — a bare multipart
+ * body used as a write-capability probe (the API answers 400).
+ *
+ * Returns HTTP status or -1. resp_body_out captures the response body up to
+ * resp_cap (BreathingRoom answers per-file results worth parsing). */
+int uph_put_files(esp_tls_t *tls, const char *host, const char *req_path,
+                  const char *bearer, const char *accept,
+                  const char *const *local_paths, int n_paths,
+                  const char *extra_field, const char *extra_value,
+                  char **resp_body_out, size_t resp_cap, bool *peer_close);
+
+int uph_put_files_named(esp_tls_t *tls, const char *host, const char *req_path,
+                        const char *bearer, const char *accept,
+                        const char *const *local_paths, int n_paths,
+                        const char *const *filenames,
+                        const char *extra_field, const char *extra_value,
+                        char **resp_body_out, size_t resp_cap, bool *peer_close);
