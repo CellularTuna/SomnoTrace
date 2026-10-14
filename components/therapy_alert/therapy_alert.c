@@ -617,8 +617,9 @@ static void alert_routine_task(void *arg)
     cfg_snapshot(&cfg);
 
     /* ── High-leak routine: the 2-minute rolling window is itself the
-     * confirmation delay, so there are no delay phases — push immediately,
-     * then the short buzzer burst.  The owner already latched
+     * confirmation delay (delay1), so the push goes out immediately.
+     * In push+sound mode the buzzer still honours delay2; in sound-only
+     * mode it fires at confirmation.  The owner already latched
      * LEAK_ST_ALERTED; this routine only performs the side effects. */
     if (s_routine_kind == ROUTINE_LEAK) {
         float    avg    = s_routine_leak_avg;
@@ -635,7 +636,31 @@ static void alert_routine_task(void *arg)
                 ESP_LOGW(TAG, "leak push failed: %s", esp_err_to_name(err));
             }
         }
-        if (!routine_stale(gen) && cfg.buzz_en) {
+
+        if (routine_stale(gen)) goto done;
+
+        /* Push+sound: wait delay2 minutes before the buzzer so an ack —
+         * or the leak resolving on its own — can still silence it.  Unlike
+         * the stop-alert path, leak recovery (re-arm) does not cancel this
+         * routine's generation, so the live state is checked directly. */
+        if (cfg.push_en && cfg.buzz_en && cfg.delay2 > 0) {
+            int delay2_ms = cfg.delay2 * 60 * 1000;
+            ESP_LOGI(TAG, "leak routine: waiting %d ms before buzzer",
+                     delay2_ms);
+            for (int waited = 0; waited < delay2_ms; waited += 1000) {
+                if (routine_stale(gen)) goto done;
+                if (!cfg.enabled || !in_window_cfg(&cfg) ||
+                    s_leak_st != LEAK_ST_ALERTED) {
+                    ESP_LOGI(TAG, "leak routine: alert no longer live during "
+                                  "delay2 — skipping buzzer");
+                    goto done;
+                }
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+        }
+
+        if (routine_stale(gen)) goto done;
+        if (cfg.buzz_en && s_leak_st == LEAK_ST_ALERTED) {
             run_leak_buzzer(gen);
         }
         goto done;

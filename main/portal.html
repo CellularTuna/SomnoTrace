@@ -880,13 +880,13 @@ Display &amp; Sound
 <div class="card" id="alert-card">
 <div class="card-title">
 <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
-Therapy Interruption Alerts
+Therapy Alerts
 </div>
 <div class="toggle-row">
-<label for="alert-enabled">Enable Therapy Interruption Alerts <span id="alert-save-status" class="setting-status"></span></label>
+<label for="alert-enabled">Enable Therapy Alerts <span id="alert-save-status" class="setting-status"></span></label>
 <label class="toggle"><input type="checkbox" id="alert-enabled" onchange="autoSaveAlert();toggleCardDisabled('alert-card','alert-enabled')"><span class="toggle-slider"></span></label>
 </div>
-<p class="card-desc">Get notified when therapy stops during a configured time window. Push notifications via ntfy.sh, with optional buzzer escalation.</p>
+<p class="card-desc">Get notified when therapy stops unexpectedly — or the leak rate stays high — during a configured time window. Push notifications via ntfy.sh, with optional buzzer escalation.</p>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">
 <div class="form-group">
 <label>Window start</label>
@@ -1000,6 +1000,17 @@ Therapy Interruption Alerts
 <label>Delay after therapy stop (minutes) <span id="alert-delay1-val" style="font-weight:normal;color:var(--text-muted)">5</span></label>
 <input type="range" id="alert-delay1" class="form-control" min="1" max="20" step="1" value="5" style="padding:0" oninput="document.getElementById('alert-delay1-val').textContent=this.value" onchange="autoSaveAlert()">
 </div>
+<hr style="border:none;border-top:1px solid var(--border-color);margin:16px 0 12px">
+<div class="toggle-row">
+<label for="alert-leak-en">High Leak Alert</label>
+<label class="toggle"><input type="checkbox" id="alert-leak-en" onchange="autoSaveAlert()"><span class="toggle-slider"></span></label>
+</div>
+<p class="card-desc">Notify when the 2-minute average leak rate stays above the threshold during therapy. Uses the window above and the alert mode, buzzer delay and ntfy settings below — they apply to both alert types. Single-click PLUS to acknowledge — alerts resume ~2 min later if the leak persists.</p>
+<div class="form-group" id="alert-leak-thresh-group">
+<label>Leak threshold (L/min) <span id="alert-leak-thresh-val" style="font-weight:normal;color:var(--text-muted)">24</span></label>
+<input type="range" id="alert-leak-thresh" class="form-control" min="15" max="60" step="1" value="24" style="padding:0" oninput="document.getElementById('alert-leak-thresh-val').textContent=this.value" onchange="autoSaveAlert()">
+</div>
+<hr style="border:none;border-top:1px solid var(--border-color);margin:16px 0 12px">
 <div class="form-group">
 <label>Alert mode</label>
 <select id="alert-mode" class="form-control" onchange="onAlertModeChange(this);autoSaveAlert()">
@@ -1035,16 +1046,6 @@ Therapy Interruption Alerts
 <div id="alert-push-group" style="margin-top:12px">
 <button type="button" class="btn btn-sm" onclick="sendAlertTestPush()">Send test push</button>
 <span id="alert-status" class="status-msg" style="margin-left:8px"></span>
-</div>
-<hr style="border:none;border-top:1px solid var(--border-color);margin:16px 0 12px">
-<div class="toggle-row">
-<label for="alert-leak-en">High Leak Alert</label>
-<label class="toggle"><input type="checkbox" id="alert-leak-en" onchange="autoSaveAlert()"><span class="toggle-slider"></span></label>
-</div>
-<p class="card-desc">Notify when the 2-minute average leak rate stays above the threshold during therapy. Uses the window, ntfy settings and sound mode above. Single-click PLUS to acknowledge — alerts resume ~2 min later if the leak persists.</p>
-<div class="form-group" id="alert-leak-thresh-group">
-<label>Leak threshold (L/min) <span id="alert-leak-thresh-val" style="font-weight:normal;color:var(--text-muted)">24</span></label>
-<input type="range" id="alert-leak-thresh" class="form-control" min="15" max="60" step="1" value="24" style="padding:0" oninput="document.getElementById('alert-leak-thresh-val').textContent=this.value" onchange="autoSaveAlert()">
 </div>
 </div>
 </div>
