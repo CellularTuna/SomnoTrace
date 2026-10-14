@@ -2,37 +2,23 @@
   <img src="assets/svg/logo-full.svg" alt="SomnoTrace" width="480" />
 </p>
 
-> A plug-and-play wireless bridge that pulls CPAP therapy and pulse oximetry data over Bluetooth, automatically saves standard European Data Format (EDF) files, and uploads them to your home network (NAS/SMB) or SleepHQ — **no SD card swapping or Wi-Fi SD cards required**.
+> A plug-and-play wireless bridge that pulls CPAP therapy and pulse oximetry data over Bluetooth, automatically saves standard European Data Format (EDF) files, and uploads them to your home network (NAS/SMB), [SleepHQ](https://sleephq.com), [Aerivue](https://aerivue.app), or [BreathingRoom](https://breathingroom.io) — **no SD card swapping or Wi-Fi SD cards required**.
 
 Created and architected by **Ilya Kruchinin** ([@ilyakruchinin](https://github.com/ilyakruchinin)).  
 Spiritual successor to [CPAP-AutoSync](https://github.com/ilyakruchinin/CPAP-AutoSync), transitioning from software-only sync to a dedicated, standalone hardware device.
 
 ---
 
-## What Makes SomnoTrace Unique?
+## Highlights
 
-SomnoTrace is the **first and only** open-source project that delivers:
-
-- 📡 **Wireless Therapy Data via BLE — No SD Card or WiFi SD Card Needed:**  
-  SomnoTrace pulls detailed sleep therapy data directly from ResMed Series 11 machines (AirSense 11 / AirCurve 11) over Bluetooth Low Energy (BLE) — **no SD card required in the CPAP machine at all**. This replaces both the daily ritual of physically swapping SD cards and the need for WiFi SD card adapters (such as EZShare). Your therapy data is captured wirelessly as you sleep.
-- ⏱️ **Zero Clock Drift (Perfect Pulse Oximeter Sync):**  
-  The AirSense 11's built-in clock drifts over time (often by minutes), causing your CPAP graphs and pulse oximeter graphs to be misaligned in OSCAR and SleepHQ. SomnoTrace continuously aligns therapy records to exact internet time (NTP), delivering sample-accurate synchronization with your oximetry data (such as the Wellue O2 Ring).
-- 🚨 **Interrupted Therapy Alerts (Insurance Compliance & Safety):**  
-  If your mask slips off or therapy stops unexpectedly during the night, SomnoTrace alerts you immediately. It sends a push notification to your phone, smartwatch (Apple Watch, Garmin, WearOS), or smart bed shaker via [ntfy](https://ntfy.sh). If unacknowledged, an escalating audible alarm sounds on the device speaker, helping you preserve required insurance compliance hours and prevent unmanaged apnea.
-- ⚡ **ResMed BLE → Wi-Fi Bridge & Smart Home Automations:**  
-  SomnoTrace bridges the machine's encrypted Bluetooth link to your local Wi-Fi network. You can query machine settings, start/stop therapy remotely, or build rich [Home Assistant automations](docs/automations.md) (e.g. automatically turn off bedroom lights when you start therapy). A built-in **MQTT client** publishes real-time therapy events and device telemetry, with Home Assistant Auto-Discovery for zero-configuration entity setup.
-- 🧠 **On-Device Sleep Staging (Official Builds):**  
-  Official SomnoTrace builds include **SomnoStage**, an on-device machine learning engine that classifies every 30-second epoch into **Wake, REM, Light, or Deep sleep** directly on the ESP32-S3 using synchronized pulse oximetry (SpO₂, pulse rate, motion). It runs 100% locally with zero cloud dependencies or subscriptions. *(Note: The model is proprietary licensed and bundled in official release builds only; source builds compile a clean, functional stub — see [somnostage](https://github.com/ilyakruchinin/somnostage)).*
-
----
-
-## Key Benefits
-
-- **No more daily SD card swapping:** Therapy data is pulled wirelessly from your CPAP machine over Bluetooth — **no SD card needed in the machine at all**. Files are saved automatically to SomnoTrace's onboard MicroSD card.
-- **Automatic uploads:** Sends your completed sleep sessions directly to your local computer / NAS share (SMB) and [SleepHQ](https://sleephq.com) as soon as therapy stops.
-- **Built-in color screen & live breathing graphs:** View real-time airflow graphs, Wi-Fi status, battery level, and clock directly on the bedside device.
-- **Easy-to-use Web Dashboard:** Connect from your phone, tablet, or computer browser to see interactive sleep charts, AHI metrics, leak rates, and device settings.
-- **Camping Mode (Temporary Offline Use):** SomnoTrace can record therapy data without any internet connection — all you need is the AirSense 11 nearby. See the [Camping Mode guide](#camping-mode-offline-use) below for details.
+- 📡 **Wireless therapy data over BLE — no SD card at all:** Pulls detailed sleep therapy data directly from ResMed Series 11 machines (AirSense 11 / AirCurve 11) over Bluetooth — no SD card needed in the machine, no Wi-Fi SD adapters (such as EZShare), no daily card swapping.
+- ⏱️ **Zero clock drift:** The AirSense 11's clock drifts by minutes, misaligning CPAP and oximeter graphs in OSCAR and SleepHQ. SomnoTrace continuously aligns therapy records to exact internet time (NTP) for sample-accurate sync with your oximetry data.
+- 🚨 **Therapy interruption & high-leak alerts:** If your mask slips off, the leak rate stays high, or therapy stops unexpectedly at night, SomnoTrace sends a push notification to your phone, smartwatch, or smart bed shaker via [ntfy](https://ntfy.sh) — with an optional escalating buzzer alarm on the device speaker.
+- ⚡ **BLE → Wi-Fi bridge & smart home:** Query machine settings or start/stop therapy remotely, and build [Home Assistant automations](docs/automations.md) (e.g. turn off bedroom lights when therapy starts). Built-in MQTT publishes live telemetry with Home Assistant Auto-Discovery.
+- 🧠 **On-device sleep staging (official builds):** SomnoStage classifies every 30-second epoch into Wake, REM, Light, or Deep sleep locally on the ESP32-S3 — no cloud, no subscription. *(Proprietary model bundled in official release builds only; source builds compile a functional stub — see [somnostage](https://github.com/ilyakruchinin/somnostage).)*
+- 📤 **Automatic uploads:** Completed sessions are sent to your local computer / NAS share (SMB), [SleepHQ](https://sleephq.com), [Aerivue](https://aerivue.app), and [BreathingRoom](https://breathingroom.io) as soon as therapy stops.
+- 🖥️ **Color screen & web dashboard:** Live breathing graphs, Wi-Fi status, battery level, and clock on the bedside LCD; interactive sleep charts and device settings from any browser at `http://somnotrace.local`.
+- 🏕️ **Camping mode:** Records therapy with no Wi-Fi or internet at all — just the AirSense 11 nearby. See the [Camping Mode guide](docs/camping.md).
 
 ---
 
@@ -55,59 +41,30 @@ SomnoTrace runs on a compact, affordable, all-in-one development board:
 - USB-C data cable (for initial flashing and charging)
 - USB-C charger (for overnight power)
 
+> ⚡ **Power note:** SomnoTrace is designed to run on **stable USB-C power** overnight — the battery is outage protection, not a primary power source. See the [Battery & Power Guidelines](docs/battery.md) (including the `--% ⚡` calibration fix).
+
 ---
 
 ## Supported Devices
 
-- **Supported CPAP Machines:**
+- **CPAP Machines:**
   - ResMed AirSense 11 (AutoSet / Elite)
   - ResMed AirCurve 11 (VAuto / ASV)
-- **Supported Pulse Oximeters:**
+- **Pulse Oximeters:**
   - **O2 Ring S (Gen2)** — Viatom model PO2B (S8-AW). Also sold as: 
     - Wellue O2Ring S
     - SleepHQ O2 Ring Pro.
-  - **O2 Ring (Gen1, experimental)** — Viatom model PO2 (S9). Also sold as:
+  - **O2 Ring (Gen1)** — Viatom model PO2 (S9). Also sold as:
     - Wellue O2Ring
     - LOOKEE O2Ring
     - SleepHQ O2 Ring (non-Pro)
+- **Upload Destinations:**
+  - Local network share (SMB — Windows, macOS, Linux/Samba)
+  - [SleepHQ](https://sleephq.com)
+  - [Aerivue](https://aerivue.app)
+  - [BreathingRoom](https://breathingroom.io)
 
 <br clear="right"/>
-
-<details>
-<summary><b>🔋 Battery & Power Guidelines — important, please read</b></summary>
-
-> SomnoTrace is designed to run on **stable USB-C power**. The internal battery is a safety net, not a primary power source.
-
-**Always connect USB-C power** during overnight therapy recording. The battery exists for **power outage protection only** — if your electricity drops mid-session, the battery keeps the device alive long enough to finish writing data and shut down safely.
-
-**Running an entire night on battery is strongly discouraged** and may result in data loss. If the battery dies mid-session, the current recording may be incomplete or corrupted. SomnoTrace does its best to flush and close files on low battery, but a sudden power loss during active Bluetooth streaming can still lose the last few seconds of data.
-
-**Battery life (emergency use only):**
-
-| Screen Brightness | Approximate Runtime |
-|---|---|
-| Medium brightness | 2–3 hours |
-| LCD screen off | Up to 11 hours |
-
-These figures are **not** a recommendation to run unplugged overnight.
-
-### Battery Calibration & Why You Might See `--% ⚡` ("Calibrating")
-
-If your screen displays **`--% ⚡`** (or the Web Portal Status shows **`--% ⚡ (Calibrating)`**):
-
-- **If you do NOT have a battery installed (running on USB-C power only):**
-  The board's charging pins float at ~4.2 V, causing the firmware to assume an uncalibrated battery is present.
-  👉 **Turn off the indicator:** Open the Web Portal, navigate to **Settings → Device Settings**, and toggle **Battery Indicator** to **OFF**. This cleanly hides the battery gauge from the LCD and sets the status to `USB Power (No battery)`.
-
-- **If you DO have a battery installed:**
-  SomnoTrace estimates battery percentage from cell voltage rather than a dedicated fuel-gauge chip. When booting or flashing firmware while plugged into USB-C with a high battery charge ($\ge 4.10\text{ V}$), the charger chip actively floats the cell at ~4.2 V. The firmware honestly indicates `--%` rather than guessing a false percentage.
-  - **How to calibrate (takes 10 seconds):**
-    1. **Unplug the USB-C cable** for 10–15 seconds.
-    2. Operating briefly on battery allows the electrochemical surface charge to relax to genuine open-circuit voltage; SomnoTrace will immediately snap to the true percentage.
-    3. Once calibrated, the percentage is stored in RTC memory across reboots, and you can plug USB-C back in.
-    - *(Alternatively, simply leave it plugged in until the battery reaches 100% full charge; calibration engages automatically upon charge completion).*
-
-</details>
 
 <details>
 <summary><b>🔘 Button Controls</b></summary>
@@ -120,37 +77,8 @@ The board has three physical buttons on the side. Here's what each one does:
 | **POWER** (middle) | Single click | Toggles the LCD backlight on or off on demand (or dismisses a temporary wake). Works across all display modes. |
 | **POWER** (middle) | Hold 5 seconds | Powers off the device. |
 | **POWER** (middle) | Hold 2 seconds | Powers on the device (when off). |
-| **PLUS** (right) | Single click | Acknowledges and silences an interrupted therapy alert (if enabled). |
+| **PLUS** (right) | Single click | Acknowledges and silences an interrupted therapy or high-leak alert (if enabled). |
 | **PLUS** (right) | Double click | Starts or stops therapy on the AirSense 11 (toggle — same as pressing the machine's own button). |
-
-</details>
-
-<details>
-<summary><b>🏕️ Camping Mode (Offline Use)</b></summary>
-
-SomnoTrace can record therapy data with **no Wi-Fi or internet connection at all** — useful for camping, travel, or during internet outages. Here's how it works and what you need to know.
-
-### Prerequisites
-
-Camping mode is **not available out of the box**. The following must be true:
-
-1. **At least one previous online session completed.** SomnoTrace needs to have previously connected to Wi-Fi, synced its clock via NTP, and recorded at least one therapy session with the AirSense 11. This establishes a "clock drift" reference that allows accurate timekeeping without internet.
-2. **The AirSense 11 must be paired.** The Bluetooth pairing happens during normal setup — once paired, the bond persists across reboots.
-
-### How to Use It
-
-1. **Turn on your AirSense 11 first**, and wait for it to be ready (screen on, not in a startup/error state).
-2. **Then power on SomnoTrace** (plug in USB-C or hold the POWER button for 2 seconds).
-3. SomnoTrace will detect that Wi-Fi is unavailable, connect to the AirSense 11 over Bluetooth, and estimate the current time using the stored clock drift.
-4. The screen will show an **"Estimated time"** notice — this is normal. Recording proceeds as usual.
-5. Therapy data is saved to the MicroSD card. If you have a local NAS/SMB share on a network without internet, uploads to that share will still work.
-6. SleepHQ cloud uploads are queued and will upload automatically once internet connectivity is restored.
-
-### Important Notes
-
-- **Always power on the AirSense 11 before SomnoTrace.** SomnoTrace waits up to 30 seconds for the AirSense 11 to connect over Bluetooth at boot. If the AS11 isn't ready in time, the device will retry a few times and may eventually enter Wi-Fi setup mode.
-- **The estimated time may drift slightly** over long offline periods, since it's based on the AS11's internal clock plus a previously measured offset. The longer since the last NTP sync, the less precise the timestamp.
-- **No data is lost.** Everything recorded during camping mode is stored on the MicroSD card and will upload to SleepHQ once you're back online.
 
 </details>
 
@@ -164,15 +92,13 @@ flowchart LR
     O2["Viatom O2 Ring\n(Gen1 / Gen2)\n(Bluetooth)"] -.->|Oximetry Sync| ESP
     ESP -->|Saved Locally| SD["MicroSD Card\n(.edf files)"]
     ESP -->|Auto Upload| SMB["Home NAS / PC Share"]
-    ESP -->|Auto Upload| SHQ["SleepHQ Cloud"]
+    ESP -->|Auto Upload| CLOUD["SleepHQ / Aerivue /\nBreathingRoom"]
     ESP -->|View in Browser| WEB["Web Dashboard & Charts"]
 ```
 
-1. **Pair Once:** [Pair SomnoTrace with your ResMed Series 11 machine](docs/pairing.md) and O2 Ring over Bluetooth in seconds using the on-screen menu.
-2. **Sleep Normally:** While you sleep, SomnoTrace records airflow, pressure, leak, and respiratory events in real time.
-3. **Automatic Processing:** When you turn off your CPAP, SomnoTrace generates standard, bit-accurate EDF files matching native SD card layouts.
-4. **Immediate Upload:** Sessions upload automatically to your configured network storage (SMB/NAS) and SleepHQ account.
-5. **Wake Up & Review:** Open `http://somnotrace.local` on your phone or laptop to view high-resolution interactive charts and sleep statistics.
+1. **Pair once** — [connect SomnoTrace to your ResMed Series 11 machine](docs/pairing.md) and O2 Ring over Bluetooth in seconds.
+2. **Sleep normally** — SomnoTrace records airflow, pressure, leak, and respiratory events in real time, then writes standard EDF files and uploads them to your configured destinations when therapy stops.
+3. **Review anywhere** — open `http://somnotrace.local` for interactive charts, or find your night in SleepHQ, Aerivue, or BreathingRoom.
 
 ---
 
@@ -192,9 +118,9 @@ Access the built-in web portal from any device on your Wi-Fi network without ins
 
 ---
 
-## Quick Start & Installation
+## Installation
 
-### Option 1: 1-Click Web Installer at somnotrace.com (Recommended — Under 1 Minute)
+### 1-Click Web Installer at somnotrace.com (Recommended — Under 1 Minute)
 
 No software, drivers, command line, or file downloads required. Install SomnoTrace directly from your browser (**Google Chrome**, **Microsoft Edge**, **Brave**, or **Opera**):
 
@@ -211,26 +137,17 @@ Once rebooted, connect your phone or computer to the **`SomnoTrace-Setup`** Wi-F
 
 👉 **[Detailed Web Flashing & Setup Guide](docs/flashing.md)**
 
----
-
-### Option 2: Building from Source (Developers)
-
-If you prefer building from source code, Docker is the only dependency:
-
-```bash
-# Compile and create the release image in dist/
-./scripts/build-dist.sh
-
-# Or compile and flash directly to a connected board
-./scripts/idf.sh -p /dev/ttyACM0 flash monitor
-```
+*Developers: Docker-based build & flash commands are documented in [`AGENTS.md`](AGENTS.md).*
 
 ---
 
-## Advanced Features & Documentation
+## Documentation
 
 - 📖 **[Web Flashing Guide](docs/flashing.md)** — Easy browser-based installation guide for everyone.
 - 🔗 **[AirSense 11 Pairing Guide](docs/pairing.md)** — Pair your ResMed CPAP with SomnoTrace over Bluetooth.
+- 🔋 **[Battery & Power Guidelines](docs/battery.md)** — Why USB-C power is recommended, and the `--% ⚡` calibration fix.
+- 🏕️ **[Camping Mode](docs/camping.md)** — Recording offline with no Wi-Fi or internet.
+- 🕛 **[Cross-Noon Sessions](docs/cross-noon.md)** — Why midday therapy stays one continuous session.
 - ⚡ **[ResMed BLE RPC Bridge Guide](docs/rpc-bridge.md)** — Send direct queries and commands (`curl` examples) to the AirSense 11 over Wi-Fi.
 - 🏠 **[Smart Home & Home Assistant Guide](docs/automations.md)** — Set up bedtime automations, compliance tracking, and mask-off alerts.
 - 🛠️ **[Hardware Reference](docs/hardware/README.md)** — Pinouts, schematics, and hardware architecture.
@@ -246,54 +163,35 @@ Connect with any FTP client (e.g., FileZilla) to `ftp://somnotrace.local`.
 
 </details>
 
-<details>
-<summary><b>🕛 Sessions That Cross Noon</b></summary>
-
-Therapy that runs through midday — a late morning lie-in, a nap that starts before 12:00 and ends after — is recorded by SomnoTrace as **one continuous session**. The AS10 and AS11 cannot do this: they cut a session at noon and write the two halves to different days.
-
-This is deliberate, and it is why SomnoTrace records the stream itself rather than relying on the machine's own summary.
-
-**Why noon at all?** ResMed's file format organises therapy into noon-to-noon days, so a session that begins before 12:00 belongs to the *previous* date. Sleeping from 23:00 Monday to 07:00 Tuesday is one "Monday" night, which is what you want. A session that crosses the noon boundary is the awkward case that convention creates.
-
-**What you will see**
-
-| Where | How a cross-noon session appears |
-| :--- | :--- |
-| SomnoTrace dashboard | One session, with its true start and end |
-| OSCAR | One session, with its true start and end |
-| Exported `BRP`/`PLD`/`EVE`/`CSL` EDFs | One recording, not split |
-
-OSCAR takes a session's extent from the recording files themselves, not from the `MaskOn`/`MaskOff` pairs in `STR.edf` — those pairs only group files into sessions and mark a day as having usable data. So a session running 06:00–13:00 displays as one seven-hour session.
-
-**The boundary detail, for anyone reading the STR file**
-
-`MaskOn`/`MaskOff` are minutes from noon and the format declares a maximum of 1440. A cross-noon session produces a window that runs past that. SomnoTrace **clamps** such a window to `[0, 1440]` rather than discarding it, so the day keeps a valid STR record — and therefore its settings: mode, pressures, EPR, and the day's statistics. A dropped record would leave the night importable but with none of that attached.
-
-**Limits of the above.** OSCAR's behaviour here is read from its source (`resmed_loader.cpp`), not measured against a running copy. SleepHQ's importer is closed, so nothing is claimed for it.
-
-</details>
-
 ---
 
-## Feature Overview
+## Features
 
-| Feature | Status | Description |
-| :--- | :---: | :--- |
-| **ResMed Series 11 Wireless Sync** | ✅ Implemented | Secure Bluetooth connection, live stream recording, and summary data retrieval. Supports AirSense 11 and AirCurve 11. |
-| **Standard EDF File Creation** | ✅ Implemented | Generates standard `STR.edf`, `BRP.edf`, `PLD.edf`, `EVE.edf`, and `CSL.edf` files compatible with OSCAR and SleepHQ. |
-| **SMB / NAS Network Upload** | ✅ Implemented | Direct file transfer to Windows, macOS, and Linux/Samba shared folders. |
-| **SleepHQ Cloud Upload** | ✅ Implemented | Direct HTTPS upload to SleepHQ with fast retry handling. |
-| **BreathingRoom Cloud Upload** | ✅ Implemented | HTTPS upload of CPAP sessions and oximetry recordings with a personal access token (oximetry requires a BreathingRoom Premium account). |
-| **Web Dashboard & Mobile UI** | ✅ Implemented | Interactive sleep charts, AHI breakdown, status telemetry, and easy setup. |
-| **LCD & Audio Alert System** | ✅ Implemented | Bedside color screen, live flow graph, and speaker alert sounds. |
-| **Sub-Second NTP Clock Sync** | ✅ Implemented | Internet time sync eliminating AirSense 11 clock drift for pulse oximeter alignment. |
-| **Therapy Interruption Alarm** | ✅ Implemented | Push notifications via ntfy (phone/smartwatch/bed shaker) and escalating audio buzzer. |
-| **BLE → Wi-Fi RPC Proxy** | ✅ Implemented | Local HTTP endpoint for remote machine queries and smart home control. |
-| **FTP File Server** | ✅ Implemented | Download EDF and session files directly from the MicroSD card using any FTP client (e.g., FileZilla). |
-| **O2 Ring Bluetooth Sync** | ✅ Implemented | Downloads stored oximetry recordings from Viatom O2 Ring (Gen1 & Gen2) over Bluetooth, with automatic upload to SMB and SleepHQ. |
-| **MQTT & Home Assistant** | ✅ Implemented | Publishes real-time therapy start/stop events, alert state, BLE connection status, and device telemetry over a single persistent MQTT connection. Home Assistant MQTT Auto-Discovery provisions all entities automatically; bidirectional command topics allow remote therapy start/stop and alarm acknowledgement. |
-| **Cross-Noon Sessions** | ✅ Implemented | Therapy spanning midday is recorded as one continuous session instead of being split at noon the way the AS10/AS11 split it. |
-| **On-Device Sleep Staging (SomnoStage)** | 🌟 Official Builds | Post-night 4-stage sleep scoring (Wake, REM, Light, Deep) running locally on the ESP32-S3 from continuous oximetry. Proprietary model included in official release builds (and flashed via somnotrace.com); source builds compile with a clean stub. |
+**Capture & Files**
+- Secure Bluetooth sync with ResMed AirSense 11 and AirCurve 11 — live stream recording and summary data retrieval
+- Downloads stored oximetry recordings from Viatom O2 Ring (Gen1 & Gen2) over Bluetooth
+- Standard `STR.edf`, `BRP.edf`, `PLD.edf`, `EVE.edf`, and `CSL.edf` files — compatible with OSCAR and SleepHQ
+- Sub-second NTP clock sync eliminates AirSense 11 clock drift for pulse oximeter alignment
+- Therapy spanning midday is recorded as one continuous session ([details](docs/cross-noon.md))
+- SomnoStage on-device sleep staging (Wake / REM / Light / Deep) — official release builds only
+
+**Upload Destinations**
+- SMB / NAS network share — Windows, macOS, and Linux/Samba folders
+- [SleepHQ](https://sleephq.com) — direct HTTPS upload with fast retry handling
+- [Aerivue](https://aerivue.app) — CPAP sessions and oximetry recordings via upload key
+- [BreathingRoom](https://breathingroom.io) — CPAP sessions and oximetry recordings via personal access token (oximetry requires a BreathingRoom Premium account)
+
+**Alerts & Smart Home**
+- Therapy interruption alarm — push notifications via [ntfy](https://ntfy.sh) (phone/smartwatch/bed shaker) and an escalating audio buzzer
+- High-leak alert — rolling 2-minute leak average with a configurable threshold, same notification path
+- MQTT client publishes therapy events, alert state, BLE status, and device telemetry; Home Assistant Auto-Discovery provisions all entities automatically
+- Bidirectional MQTT commands for remote therapy start/stop and alarm acknowledgement
+- BLE → Wi-Fi RPC bridge — local HTTP endpoint for machine queries and smart home control
+
+**Interfaces**
+- Web dashboard — interactive sleep charts, AHI breakdown, status telemetry, easy setup
+- 1.54" color LCD — live flow graph, Wi-Fi/battery/clock status
+- Built-in FTP server — download EDF and session files directly from the MicroSD card
 
 ---
 
@@ -338,6 +236,6 @@ Official release builds (published on GitHub Releases and flashed via the 1-clic
 
 ## Medical Disclaimer
 
-SomnoTrace is an independent open-source project and is **not affiliated with, endorsed by, or associated with** ResMed, Wellue / Viatom, or SleepHQ. It is intended strictly for personal data portability and interoperability research. SomnoTrace is **not a medical device** and must not be used for clinical diagnosis, treatment decisions, or life-critical monitoring. Use entirely at your own risk.
+SomnoTrace is an independent open-source project and is **not affiliated with, endorsed by, or associated with** ResMed, Wellue / Viatom, SleepHQ, Aerivue, or BreathingRoom. It is intended strictly for personal data portability and interoperability research. SomnoTrace is **not a medical device** and must not be used for clinical diagnosis, treatment decisions, or life-critical monitoring. Use entirely at your own risk.
 
 ![GitHub Downloads (all assets, latest release)](https://img.shields.io/github/downloads/ilyakruchinin/somnotrace/latest/total)
