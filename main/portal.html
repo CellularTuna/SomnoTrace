@@ -1036,6 +1036,16 @@ Therapy Interruption Alerts
 <button type="button" class="btn btn-sm" onclick="sendAlertTestPush()">Send test push</button>
 <span id="alert-status" class="status-msg" style="margin-left:8px"></span>
 </div>
+<hr style="border:none;border-top:1px solid var(--border-color);margin:16px 0 12px">
+<div class="toggle-row">
+<label for="alert-leak-en">High Leak Alert</label>
+<label class="toggle"><input type="checkbox" id="alert-leak-en" onchange="autoSaveAlert()"><span class="toggle-slider"></span></label>
+</div>
+<p class="card-desc">Notify when the 2-minute average leak rate stays above the threshold during therapy. Uses the window, ntfy settings and sound mode above. Single-click PLUS to acknowledge — alerts resume ~2 min later if the leak persists.</p>
+<div class="form-group" id="alert-leak-thresh-group">
+<label>Leak threshold (L/min) <span id="alert-leak-thresh-val" style="font-weight:normal;color:var(--text-muted)">24</span></label>
+<input type="range" id="alert-leak-thresh" class="form-control" min="15" max="60" step="1" value="24" style="padding:0" oninput="document.getElementById('alert-leak-thresh-val').textContent=this.value" onchange="autoSaveAlert()">
+</div>
 </div>
 </div>
 </details>
@@ -2871,7 +2881,9 @@ function autoSaveAlert() {
       ntfy_topic: (document.getElementById('alert-ntfy-topic') || {}).value || '',
       ntfy_prio: parseInt((document.getElementById('alert-ntfy-prio') || {}).value || '5', 10),
       delay2: parseInt((document.getElementById('alert-delay2') || {}).value || '5', 10),
-      buzz_en: mode === 'both' || mode === 'sound'
+      buzz_en: mode === 'both' || mode === 'sound',
+      leak_en: !!(document.getElementById('alert-leak-en') || {}).checked,
+      leak_thresh: parseInt((document.getElementById('alert-leak-thresh') || {}).value || '24', 10)
     };
     fetch('/api/alert/config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2931,6 +2943,11 @@ function renderAlertConfig(d) {
     else modeSel.value = 'sound';
     onAlertModeChange(modeSel);
   }
+  setChk('alert-leak-en', d.leak_en);
+  var lt = d.leak_thresh || 24;
+  if (lt < 15) lt = 15; if (lt > 60) lt = 60;
+  setVal('alert-leak-thresh', String(lt));
+  setTxt('alert-leak-thresh-val', String(lt));
 }
 function loadAlertConfig() {
   fetch('/api/alert/config').then(function(r){ return r.json(); }).then(function(d) {

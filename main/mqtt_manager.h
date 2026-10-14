@@ -109,6 +109,9 @@ void mqtt_manager_on_therapy_stop(void);
 /* Called when therapy alert state changes (immediate state publish). */
 void mqtt_manager_on_alert_state_changed(alert_state_t new_state);
 
+/* Called when the high-leak alert sub-state changes (immediate publish). */
+void mqtt_manager_on_leak_state_changed(leak_alert_state_t new_state);
+
 /* ── Configuration API (for Web UI / REST) ────────────────────────────── */
 
 /* Load MQTT config from NVS into cfg. */

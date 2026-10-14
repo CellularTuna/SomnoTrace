@@ -43,6 +43,7 @@
 #include "esp_wifi.h"
 #include "driver/ledc.h"
 #include "device_settings.h"
+#include "leak_roll.h"
 #include "psram_task.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -185,6 +186,7 @@ static int64_t  s_therapy_start_us = 0;  /* monotonic time of TherapyStart */
 static int64_t  s_leak_updated_us = 0;
 static int64_t  s_pressure_updated_us = 0;
 static float    s_pressure_cmh2o = 0.0f;
+static leak_roll_t s_leak_roll;          /* 2-min rolling leak window    */
 
 static void reset_live_stats(void)
 {
@@ -194,6 +196,7 @@ static void reset_live_stats(void)
     s_leak_updated_us = 0;
     s_pressure_updated_us = 0;
     s_pressure_cmh2o = 0.0f;
+    leak_roll_reset(&s_leak_roll);
 }
 
 /* ── Public state-mutating API (never draws; render task handles drawing) ── */
@@ -305,7 +308,9 @@ void bsp_display_push_leak(float leak_lpm)
         s_leak_lpm = leak_lpm;
         s_leak_sum += leak_lpm;
         s_leak_count++;
-        s_leak_updated_us = esp_timer_get_time();
+        int64_t now_us = esp_timer_get_time();
+        s_leak_updated_us = now_us;
+        leak_roll_push(&s_leak_roll, leak_lpm, now_us);
     }
     bool notify = s_therapy_active && s_mode == DISP_MODE_INFO;
     xSemaphoreGive(s_state_mutex);
@@ -340,8 +345,33 @@ void bsp_display_get_live_stats(bsp_live_stats_t *out)
     if (out->leak_valid) {
         out->leak_lpm = s_leak_lpm;
         out->leak_avg_lpm = (float)(s_leak_sum / s_leak_count);
+        out->leak_roll_lpm = leak_roll_avg(&s_leak_roll);
     }
+    out->leak_roll_ready = out->leak_valid && leak_roll_ready(&s_leak_roll);
     if (out->pressure_valid) out->pressure_cmh2o = s_pressure_cmh2o;
+    xSemaphoreGive(s_state_mutex);
+}
+
+void bsp_display_get_leak_roll(float *avg_lpm, bool *ready)
+{
+    if (!s_state_mutex) {
+        if (avg_lpm) *avg_lpm = 0.0f;
+        if (ready)   *ready = false;
+        return;
+    }
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    bool fresh = s_therapy_active && s_leak_updated_us > 0 &&
+                 esp_timer_get_time() - s_leak_updated_us < BSP_LIVE_STALE_US;
+    if (avg_lpm) *avg_lpm = leak_roll_avg(&s_leak_roll);
+    if (ready)   *ready = fresh && leak_roll_ready(&s_leak_roll);
+    xSemaphoreGive(s_state_mutex);
+}
+
+void bsp_display_reset_leak_window(void)
+{
+    if (!s_state_mutex) return;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    leak_roll_reset(&s_leak_roll);
     xSemaphoreGive(s_state_mutex);
 }
 
@@ -929,6 +959,11 @@ void bsp_display_set_as11_paired(bool paired)
     if (!paired) {
         s_leak_updated_us = 0;
         s_pressure_updated_us = 0;
+        /* Drop the rolling window too: after a disconnect the old buckets
+         * are stale, and letting fresh samples mix with them could fire a
+         * false high-leak alert on reconnect.  Refill takes ~2 min — a
+         * conservative blind spot, not a wrong answer. */
+        leak_roll_reset(&s_leak_roll);
     }
     s_status_dirty = true;
     xSemaphoreGive(s_state_mutex);

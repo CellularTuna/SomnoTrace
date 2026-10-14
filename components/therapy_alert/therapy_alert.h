@@ -56,6 +56,36 @@ typedef struct {
     .buzz_en = true, \
 }
 
+/* ── High-leak alert (separate NVS blob, key "leak") ──────────────────
+ * Kept out of the struct above on purpose: the "cfg" blob layout stays
+ * byte-identical, so upgrading/downgrading firmware never loses the
+ * existing alert configuration. */
+
+typedef struct {
+    bool     enabled;          /* leak_en — opt-in, default off          */
+    uint8_t  thresh_lpm;       /* rolling-avg threshold, L/min           */
+} leak_alert_config_t;
+
+/* Threshold floor: the re-arm level is thresh − 6, and must sit above the
+ * normal seal band (~0–12 L/min) or the alert flaps on ordinary noise. */
+#define LEAK_THRESH_MIN    15
+#define LEAK_THRESH_MAX    60
+#define LEAK_THRESH_DEF    24
+#define LEAK_REARM_DROP_LPM 6
+
+#define LEAK_ALERT_DEFAULTS { \
+    .enabled = false, \
+    .thresh_lpm = LEAK_THRESH_DEF, \
+}
+
+typedef enum {
+    LEAK_ST_DISABLED = 0,  /* master off or leak_en off                 */
+    LEAK_ST_IDLE,          /* enabled but therapy inactive/out of window */
+    LEAK_ST_WARMING,       /* therapy active; rolling window not full yet */
+    LEAK_ST_WATCHING,      /* window full, average below threshold        */
+    LEAK_ST_ALERTED,       /* fired and latched                          */
+} leak_alert_state_t;
+
 /* ── Alert state (for /api/status and LCD) ──────────────────────────── */
 
 typedef enum {
@@ -81,6 +111,15 @@ typedef bool (*alert_therapy_active_fn_t)(void);
 /* Alert state-change notification callback (e.g. for MQTT telemetry push). */
 typedef void (*alert_state_change_cb_t)(alert_state_t new_state);
 
+/* Rolling-leak stats getter (matches bsp_display_get_leak_roll). */
+typedef void (*alert_leak_roll_fn_t)(float *avg_lpm, bool *ready);
+
+/* Rolling-window reset (matches bsp_display_reset_leak_window). */
+typedef void (*alert_leak_reset_fn_t)(void);
+
+/* Leak alert state-change callback (e.g. MQTT state republish). */
+typedef void (*alert_leak_state_cb_t)(leak_alert_state_t new_state);
+
 /* Inject the buzzer function (called from main.c at init). */
 void therapy_alert_set_beep_fn(alert_beep_fn_t fn);
 
@@ -92,6 +131,15 @@ void therapy_alert_set_therapy_active_fn(alert_therapy_active_fn_t fn);
 
 /* Inject state-change callback (called from main.c at init). */
 void therapy_alert_set_state_change_cb(alert_state_change_cb_t cb);
+
+/* Inject the rolling-leak getter (called from main.c at init). */
+void therapy_alert_set_leak_roll_fn(alert_leak_roll_fn_t fn);
+
+/* Inject the rolling-window reset (called from main.c at init). */
+void therapy_alert_set_leak_reset_fn(alert_leak_reset_fn_t fn);
+
+/* Inject the leak state-change callback (called from main.c at init). */
+void therapy_alert_set_leak_state_cb(alert_leak_state_cb_t cb);
 
 /* ── Lifecycle ──────────────────────────────────────────────────────── */
 
@@ -129,6 +177,10 @@ alert_state_t therapy_alert_get_state(void);
 
 /* Get alert state as a string for /api/status. */
 const char *therapy_alert_state_str(alert_state_t st);
+
+/* Get current leak-alert sub-state and its string form. */
+leak_alert_state_t therapy_alert_get_leak_state(void);
+const char *therapy_alert_leak_state_str(leak_alert_state_t st);
 
 /* Send a test push notification (for the "Send test push" button).
  * If json_override is non-NULL, parse push_en/ntfy_srv/ntfy_topic/ntfy_prio

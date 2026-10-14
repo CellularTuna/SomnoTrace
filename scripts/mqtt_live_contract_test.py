@@ -56,6 +56,7 @@ code = r'''
 #include <string.h>
 #include "cJSON.h"
 #include "bsp_display.h"
+#include "leak_roll.h"
 #define portMAX_DELAY 0
 #define pdTRUE 1
 #define pdMS_TO_TICKS(x) (x)
@@ -81,7 +82,7 @@ bool bsp_display_is_therapy_active(void) { return s_therapy_active; }
 static int s_client = 1, s_conn_state = 1;
 static char s_live_topic[64] = "test/live", s_lwt_topic[64] = "test/status";
 static char s_device_id[32] = "somnotrace_test";
-static cJSON *last_live, *discovery[3];
+static cJSON *last_live, *discovery[4];
 static int disc_count;
 static int64_t live_times[32], state_times[32];
 static int live_count, state_count;
@@ -101,7 +102,7 @@ static int esp_mqtt_client_publish(int client, const char *topic, const char *da
 static void publish_entity_discovery(const char *component, const char *key, cJSON *cfg) {
     (void)key;
     assert(strcmp(component, "sensor") == 0);
-    assert(disc_count < 3);
+    assert(disc_count < 4);
     discovery[disc_count++] = cfg;
 }
 static void do_publish_state(void) { state_times[state_count++] = now_us / 1000; }
@@ -165,12 +166,24 @@ int main(void) {
     assert(snapshot.active && snapshot.leak_valid && snapshot.pressure_valid);
     assert(snapshot.leak_lpm == 12.0f && snapshot.leak_avg_lpm == 6.0f);
     assert(fabsf(snapshot.pressure_cmh2o - 8.4f) < 0.001f);
+    /* Both pushes landed in the same second: the rolling ring holds no
+     * completed bucket yet, so the window is neither populated nor full. */
+    assert(snapshot.leak_roll_lpm == 0.0f && !snapshot.leak_roll_ready);
     bsp_display_push_leak(NAN);
     bsp_display_push_leak(INFINITY);
     bsp_display_push_leak(-1.0f);
     bsp_display_push_pressure(NAN);
     bsp_display_push_pressure(-1.0f);
     assert(s_leak_count == 2);
+    /* Cross a second boundary: the accumulated (0+12)/2 bucket flushes.
+     * Pressure is refreshed too so both channels share one update time
+     * for the staleness assertions below. */
+    now_us += 1000000;
+    bsp_display_push_leak(6.0f);
+    bsp_display_push_pressure(8.4f);
+    bsp_display_get_live_stats(&snapshot);
+    assert(fabsf(snapshot.leak_roll_lpm - 6.0f) < 0.001f);
+    assert(!snapshot.leak_roll_ready);   /* one bucket is not a window */
     now_us += BSP_LIVE_STALE_US - 1;
     bsp_display_get_live_stats(&snapshot);
     assert(snapshot.leak_valid && snapshot.pressure_valid);
@@ -187,13 +200,14 @@ int main(void) {
     bsp_display_set_as11_paired(true);
     bsp_display_get_live_stats(&snapshot);
     assert(!snapshot.leak_valid && !snapshot.pressure_valid);
-    assert(s_leak_count == 3);
+    assert(s_leak_count == 4);
     s_therapy_active = false;
     bsp_display_push_leak(99.0f);
-    assert(s_leak_count == 3);
+    assert(s_leak_count == 4);
     do_publish_live();
     assert(cJSON_IsNull(field(last_live, "leak_rate")));
     assert(cJSON_IsNull(field(last_live, "leak_avg")));
+    assert(cJSON_IsNull(field(last_live, "leak_roll")));
     assert(cJSON_IsNull(field(last_live, "pressure")));
     assert(cJSON_IsFalse(field(last_live, "leak_valid")));
     s_therapy_active = true;
@@ -214,10 +228,11 @@ int main(void) {
     s_conn_state = 1;
     publish_live_sensor("leak_rate", "Leak Rate", "L/min", "leak_valid", "mdi:air-filter");
     publish_live_sensor("leak_avg", "Session Average Leak", "L/min", "leak_valid", "mdi:air-filter");
+    publish_live_sensor("leak_roll", "Leak Rate (2-min Avg)", "L/min", "leak_valid", "mdi:air-filter");
     publish_live_sensor("pressure", "Mask Pressure", "cmH2O", "pressure_valid", "mdi:gauge");
-    assert(disc_count == 3);
-    const char *keys[] = { "leak_rate", "leak_avg", "pressure" };
-    for (int i = 0; i < 3; i++) {
+    assert(disc_count == 4);
+    const char *keys[] = { "leak_rate", "leak_avg", "leak_roll", "pressure" };
+    for (int i = 0; i < 4; i++) {
         cJSON *cfg = discovery[i];
         char expected[100];
         snprintf(expected, sizeof(expected), "somnotrace_test_%s", keys[i]);
@@ -225,7 +240,7 @@ int main(void) {
         text(cfg, "state_topic", "test/live");
         snprintf(expected, sizeof(expected), "{{ value_json.%s }}", keys[i]);
         text(cfg, "value_template", expected);
-        text(cfg, "unit_of_measurement", i == 2 ? "cmH2O" : "L/min");
+        text(cfg, "unit_of_measurement", i == 3 ? "cmH2O" : "L/min");
         text(cfg, "state_class", "measurement");
         text(cfg, "availability_mode", "all");
         assert(field(cfg, "expire_after")->valueint == 30);
@@ -233,7 +248,7 @@ int main(void) {
         assert(cJSON_GetArraySize(availability) == 2);
         text(cJSON_GetArrayItem(availability, 0), "topic", "test/status");
         text(cJSON_GetArrayItem(availability, 1), "topic", "test/live");
-        text(cJSON_GetArrayItem(availability, 1), "value_template", i == 2 ?
+        text(cJSON_GetArrayItem(availability, 1), "value_template", i == 3 ?
              "{{ 'online' if value_json.pressure_valid else 'offline' }}" :
              "{{ 'online' if value_json.leak_valid else 'offline' }}");
         cJSON_Delete(cfg);
@@ -278,7 +293,8 @@ with tempfile.TemporaryDirectory(prefix="somnotrace-mqtt-live-") as tmp:
     source.write_text(code)
     command = shlex.split(os.environ.get("CC", "gcc")) + [
         "-std=gnu11", "-Wall", "-Wextra", "-Wno-unused-function", "-O1", "-g",
-        *includes, f"-I{MAIN}", f"-I{ROOT / 'scripts/test_include'}", str(source), *library,
+        *includes, f"-I{MAIN}", f"-I{ROOT / 'scripts/test_include'}", str(source),
+        str(MAIN / "leak_roll.c"), *library,
         "-lm", "-o", str(binary),
     ]
     if not os.environ.get("SNT_NO_SANITIZE"):

@@ -45,17 +45,24 @@ static const char *TAG = "therapy_alert";
 
 #define NVS_NAMESPACE  "alert"
 #define NVS_KEY_CFG    "cfg"
+#define NVS_KEY_LEAK   "leak"
 
 /* ── Injected functions ─────────────────────────────────────────────── */
 static alert_beep_fn_t          s_beep_fn  = NULL;
 static alert_nvs_exec_fn_t       s_nvs_exec = NULL;
 static alert_therapy_active_fn_t s_therapy_active_fn = NULL;
 static alert_state_change_cb_t   s_state_change_cb   = NULL;
+static alert_leak_roll_fn_t      s_leak_roll_fn      = NULL;
+static alert_leak_reset_fn_t     s_leak_reset_fn     = NULL;
+static alert_leak_state_cb_t     s_leak_state_cb     = NULL;
 
 void therapy_alert_set_beep_fn(alert_beep_fn_t fn)    { s_beep_fn = fn; }
 void therapy_alert_set_nvs_executor(alert_nvs_exec_fn_t fn) { s_nvs_exec = fn; }
 void therapy_alert_set_therapy_active_fn(alert_therapy_active_fn_t fn) { s_therapy_active_fn = fn; }
 void therapy_alert_set_state_change_cb(alert_state_change_cb_t cb)     { s_state_change_cb = cb; }
+void therapy_alert_set_leak_roll_fn(alert_leak_roll_fn_t fn)           { s_leak_roll_fn = fn; }
+void therapy_alert_set_leak_reset_fn(alert_leak_reset_fn_t fn)         { s_leak_reset_fn = fn; }
+void therapy_alert_set_leak_state_cb(alert_leak_state_cb_t cb)         { s_leak_state_cb = cb; }
 
 /* ── Concurrency model ──────────────────────────────────────────────────
  *
@@ -89,6 +96,8 @@ void therapy_alert_set_state_change_cb(alert_state_change_cb_t cb)     { s_state
  * under s_cfg_mtx and post EVT_CONFIG; the owner promotes it. */
 static therapy_alert_config_t s_cfg = ALERT_DEFAULTS;
 static therapy_alert_config_t s_cfg_staged = ALERT_DEFAULTS;
+static leak_alert_config_t    s_leak_cfg = LEAK_ALERT_DEFAULTS;
+static leak_alert_config_t    s_leak_cfg_staged = LEAK_ALERT_DEFAULTS;
 static bool s_cfg_loaded = false;
 
 static StaticSemaphore_t s_cfg_mtx_buf;
@@ -96,6 +105,7 @@ static SemaphoreHandle_t s_cfg_mtx = NULL;
 
 /* ── State machine (owner task only) ────────────────────────────────── */
 static volatile alert_state_t s_state = ALERT_DISARMED;
+static volatile leak_alert_state_t s_leak_st = LEAK_ST_DISABLED;
 
 /* Escalation-routine generation.  Cancelling is a counter bump, not a
  * handle-and-sleep handshake: any routine whose captured generation no
@@ -104,6 +114,15 @@ static volatile alert_state_t s_state = ALERT_DISARMED;
  * callback and the dangling-handle race on s_alert_task_h. */
 static volatile uint32_t s_routine_gen = 0;
 static bool s_routine_active = false;      /* owner task only */
+
+/* Routine kind: the owner writes these before creating the task; the task
+ * reads them once at start (a superseded routine aborts on the gen check
+ * anyway, so a stale read can only affect a routine already cancelling). */
+#define ROUTINE_STOP 0   /* therapy-stop escalation: delay1→push→delay2→buzz */
+#define ROUTINE_LEAK 1   /* high-leak: immediate push + optional buzz       */
+static uint8_t  s_routine_kind        = ROUTINE_STOP;
+static float    s_routine_leak_avg    = 0.0f;
+static uint8_t  s_routine_leak_thresh = 0;
 
 /* ── Event queue ────────────────────────────────────────────────────── */
 typedef enum {
@@ -127,6 +146,7 @@ typedef struct {
 #define ALERT_MONITOR_STACK 4096
 #define ALERT_ROUTINE_STACK 16384
 #define ALERT_TICK_MS       30000
+#define LEAK_TICK_MS        5000   /* eval cadence while monitoring a session */
 
 static StaticQueue_t s_evt_q_buf;
 static uint8_t       s_evt_q_storage[ALERT_EVT_Q_LEN * sizeof(alert_evt_t)];
@@ -139,6 +159,8 @@ static StackType_t  *s_monitor_stack;
 static void cancel_alert_routine(void);
 static void reevaluate_state(void);
 static void set_state(alert_state_t st);
+static void set_leak_state(leak_alert_state_t st);
+static void evaluate_leak(void);
 static void report_stack_headroom(const char *why);
 
 /* Post an event.  Never blocks: callers include a NimBLE host callback and
@@ -213,6 +235,34 @@ static bool currently_in_window(void)
     return in_window_cfg(&s_cfg);
 }
 
+const char *therapy_alert_leak_state_str(leak_alert_state_t st)
+{
+    switch (st) {
+        case LEAK_ST_DISABLED: return "disabled";
+        case LEAK_ST_IDLE:     return "idle";
+        case LEAK_ST_WARMING:  return "warming_up";
+        case LEAK_ST_WATCHING: return "watching";
+        case LEAK_ST_ALERTED:  return "alerted";
+        default:               return "unknown";
+    }
+}
+
+leak_alert_state_t therapy_alert_get_leak_state(void)
+{
+    return s_leak_st;
+}
+
+/* Owner task only. */
+static void set_leak_state(leak_alert_state_t st)
+{
+    if (s_leak_st == st) return;
+    s_leak_st = st;
+    ESP_LOGI(TAG, "leak alert → %s", therapy_alert_leak_state_str(st));
+    if (s_leak_state_cb) {
+        s_leak_state_cb(st);
+    }
+}
+
 const char *therapy_alert_state_str(alert_state_t st)
 {
     switch (st) {
@@ -273,6 +323,30 @@ static esp_err_t do_load_config(void *arg)
     return err;
 }
 
+static esp_err_t do_save_leak(void *arg)
+{
+    const leak_alert_config_t *cfg = (const leak_alert_config_t *)arg;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_blob(h, NVS_KEY_LEAK, cfg, sizeof(*cfg));
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
+static esp_err_t do_load_leak(void *arg)
+{
+    leak_alert_config_t *out = arg;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) return err;
+    size_t required = sizeof(*out);
+    err = nvs_get_blob(h, NVS_KEY_LEAK, out, &required);
+    nvs_close(h);
+    return err;
+}
+
 esp_err_t therapy_alert_load_config(therapy_alert_config_t *cfg)
 {
     if (!cfg) return ESP_ERR_INVALID_ARG;
@@ -317,24 +391,53 @@ esp_err_t therapy_alert_save_config_json(const char *json_str)
     if ((j = cJSON_GetObjectItem(root, "delay2")))     cfg.delay2 = (uint16_t)j->valuedouble;
     if ((j = cJSON_GetObjectItem(root, "buzz_en")))    cfg.buzz_en = cJSON_IsTrue(j);
 
+    /* Leak-alert fields live in the separate "leak" blob — the "cfg" blob
+     * stays byte-identical so upgrades/downgrades never disturb it. */
+    leak_alert_config_t leak;
+    if (s_cfg_mtx && xSemaphoreTake(s_cfg_mtx, pdMS_TO_TICKS(100)) == pdTRUE) {
+        leak = s_leak_cfg;
+        xSemaphoreGive(s_cfg_mtx);
+    } else {
+        leak = s_leak_cfg;
+    }
+    bool leak_touched = false;
+    if ((j = cJSON_GetObjectItem(root, "leak_en"))) {
+        leak.enabled = cJSON_IsTrue(j);
+        leak_touched = true;
+    }
+    if ((j = cJSON_GetObjectItem(root, "leak_thresh"))) {
+        int t = (int)j->valuedouble;
+        if (t < LEAK_THRESH_MIN) t = LEAK_THRESH_MIN;
+        if (t > LEAK_THRESH_MAX) t = LEAK_THRESH_MAX;
+        leak.thresh_lpm = (uint8_t)t;
+        leak_touched = true;
+    }
+
     cJSON_Delete(root);
 
     /* Persist via injected NVS executor (safe from PSRAM-stack httpd). */
     esp_err_t err = s_nvs_exec ? s_nvs_exec(do_save_config, &cfg)
                                : do_save_config(&cfg);
+    if (err == ESP_OK && leak_touched) {
+        err = s_nvs_exec ? s_nvs_exec(do_save_leak, &leak)
+                         : do_save_leak(&leak);
+    }
     if (err == ESP_OK) {
         /* Stage the new config and let the owner task promote it, so the
          * live config is never written from an httpd worker while the state
          * machine is deciding on it. */
         if (s_cfg_mtx && xSemaphoreTake(s_cfg_mtx, pdMS_TO_TICKS(1000)) == pdTRUE) {
             s_cfg_staged = cfg;
+            s_leak_cfg_staged = leak;
             xSemaphoreGive(s_cfg_mtx);
         } else {
             s_cfg_staged = cfg;
+            s_leak_cfg_staged = leak;
         }
-        ESP_LOGI(TAG, "config saved: en=%d win=%d-%d d1=%d push=%d buzz=%d",
+        ESP_LOGI(TAG, "config saved: en=%d win=%d-%d d1=%d push=%d buzz=%d "
+                 "leak_en=%d leak_thresh=%d",
                  cfg.enabled, cfg.win_start, cfg.win_end, cfg.delay1,
-                 cfg.push_en, cfg.buzz_en);
+                 cfg.push_en, cfg.buzz_en, leak.enabled, leak.thresh_lpm);
         /* Re-evaluate state on the owner task: a schedule change may
          * arm or disarm. */
         post_evt(EVT_CONFIG, 0, 0);
@@ -361,8 +464,26 @@ esp_err_t therapy_alert_get_config_json(char **out_json)
     cJSON_AddNumberToObject(root, "delay2", cfg.delay2);
     cJSON_AddBoolToObject(root, "buzz_en", cfg.buzz_en);
 
+    leak_alert_config_t leak;
+    {
+        if (s_cfg_mtx && xSemaphoreTake(s_cfg_mtx, pdMS_TO_TICKS(100)) == pdTRUE) {
+            leak = s_leak_cfg;
+            xSemaphoreGive(s_cfg_mtx);
+        } else {
+            leak = s_leak_cfg;
+        }
+    }
+    cJSON_AddBoolToObject(root, "leak_en", leak.enabled);
+    cJSON_AddNumberToObject(root, "leak_thresh", leak.thresh_lpm);
+
     cJSON *st = cJSON_AddObjectToObject(root, "state");
     cJSON_AddStringToObject(st, "alert", therapy_alert_state_str(therapy_alert_get_state()));
+    cJSON_AddStringToObject(st, "leak", therapy_alert_leak_state_str(therapy_alert_get_leak_state()));
+    float roll_lpm = 0.0f;
+    bool roll_ready = false;
+    if (s_leak_roll_fn) s_leak_roll_fn(&roll_lpm, &roll_ready);
+    if (roll_lpm > 0.0f) cJSON_AddNumberToObject(st, "leak_roll", roll_lpm);
+    else cJSON_AddNullToObject(st, "leak_roll");
 
     *out_json = cJSON_Print(root);
     cJSON_Delete(root);
@@ -448,18 +569,31 @@ static inline bool routine_stale(uint32_t gen)
     return s_routine_gen != gen;
 }
 
-static void run_buzzer(uint32_t gen)
+static void run_beeps(uint32_t gen, int freq_hz, int n, int on_ms, int off_ms)
 {
     if (!s_beep_fn) {
         ESP_LOGW(TAG, "buzzer: no beep function injected");
         return;
     }
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < n; i++) {
         if (routine_stale(gen)) break;
-        s_beep_fn(880, 1000, 100);
+        s_beep_fn(freq_hz, on_ms, 100);
         if (routine_stale(gen)) break;
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(off_ms));
     }
+}
+
+/* Therapy-stop alarm: five long low beeps. */
+static void run_buzzer(uint32_t gen)
+{
+    run_beeps(gen, 880, 5, 1000, 1000);
+}
+
+/* High-leak alarm: three short high beeps — distinguishable from the
+ * therapy-stop pattern by ear alone. */
+static void run_leak_buzzer(uint32_t gen)
+{
+    run_beeps(gen, 1320, 3, 300, 400);
 }
 
 /* ── Alert routine task ─────────────────────────────────────────────── */
@@ -481,6 +615,31 @@ static void alert_routine_task(void *arg)
      * escalation would mix old and new settings. */
     therapy_alert_config_t cfg;
     cfg_snapshot(&cfg);
+
+    /* ── High-leak routine: the 2-minute rolling window is itself the
+     * confirmation delay, so there are no delay phases — push immediately,
+     * then the short buzzer burst.  The owner already latched
+     * LEAK_ST_ALERTED; this routine only performs the side effects. */
+    if (s_routine_kind == ROUTINE_LEAK) {
+        float    avg    = s_routine_leak_avg;
+        uint8_t  thresh = s_routine_leak_thresh;
+        if (cfg.push_en && cfg.ntfy_topic[0]) {
+            char body[80];
+            snprintf(body, sizeof(body),
+                     "High leak rate: %.1f L/min (2-min avg, limit %u)",
+                     (double)avg, (unsigned)thresh);
+            esp_err_t err = send_ntfy_push(cfg.ntfy_srv, cfg.ntfy_topic,
+                                           "SomnoTrace Alert", body,
+                                           cfg.ntfy_prio);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "leak push failed: %s", esp_err_to_name(err));
+            }
+        }
+        if (!routine_stale(gen) && cfg.buzz_en) {
+            run_leak_buzzer(gen);
+        }
+        goto done;
+    }
 
     /* Phase 1: wait delay1 minutes, then send push (if enabled) */
     int delay1_ms = cfg.delay1 * 60 * 1000;
@@ -641,8 +800,10 @@ static bool track_routine_for_reap(TaskHandle_t h, StackType_t *stack,
     return false;
 }
 
-/* Owner task only. */
-static void start_alert_routine(void)
+/* Owner task only.  kind selects the routine body; leak_avg/thresh are the
+ * push-message payload for ROUTINE_LEAK (ignored otherwise).  State
+ * transitions (ALERT_PENDING / LEAK_ST_ALERTED) are the caller's job. */
+static void start_alert_routine(uint8_t kind, float leak_avg, uint8_t leak_thresh)
 {
     /* Release what earlier routines left behind before taking another 16 KB. */
     reap_finished_routines();
@@ -651,7 +812,9 @@ static void start_alert_routine(void)
      * observe the mismatch and exit on its own.  The handle is kept only so
      * the sweep above can tell when that routine's stack is safe to free. */
     uint32_t gen = ++s_routine_gen;
-    set_state(ALERT_PENDING);
+    s_routine_kind        = kind;
+    s_routine_leak_avg    = leak_avg;
+    s_routine_leak_thresh = leak_thresh;
 
     TaskHandle_t h = NULL;
     StackType_t *stack = heap_caps_malloc(ALERT_ROUTINE_STACK, MALLOC_CAP_SPIRAM);
@@ -664,13 +827,17 @@ static void start_alert_routine(void)
     }
     if (!h) {
         /* Without the routine there will be no push and no buzzer, so say so
-         * rather than sitting silently in PENDING for ever.  Whichever of the
-         * two allocations succeeded is released here: this path leaked it even
-         * when no task was ever created. */
-        ESP_LOGE(TAG, "failed to create alert routine task — disarming");
+         * rather than sitting silently latched forever.  Whichever of the two
+         * allocations succeeded is released here: this path leaked it even
+         * when no task was ever created.  Leak routines fall back to
+         * WATCHING so the 5 s tick can retry once memory frees up. */
+        ESP_LOGE(TAG, "failed to create alert routine task — reverting");
         heap_caps_free(stack);
         heap_caps_free(tcb);
-        set_state(ALERT_DISARMED);
+        if (kind == ROUTINE_LEAK)
+            set_leak_state(LEAK_ST_WATCHING);
+        else
+            set_state(ALERT_DISARMED);
         return;
     }
     if (!track_routine_for_reap(h, stack, tcb)) {
@@ -752,9 +919,11 @@ static void promote_staged_config(void)
 {
     if (s_cfg_mtx && xSemaphoreTake(s_cfg_mtx, pdMS_TO_TICKS(1000)) == pdTRUE) {
         s_cfg = s_cfg_staged;
+        s_leak_cfg = s_leak_cfg_staged;
         xSemaphoreGive(s_cfg_mtx);
     } else {
         s_cfg = s_cfg_staged;
+        s_leak_cfg = s_leak_cfg_staged;
     }
 }
 
@@ -789,7 +958,8 @@ static void handle_therapy_stop(void)
             return;
         }
         ESP_LOGI(TAG, "therapy stop while armed inside window — starting alert routine");
-        start_alert_routine();
+        set_state(ALERT_PENDING);
+        start_alert_routine(ROUTINE_STOP, 0.0f, 0);
     } else {
         ESP_LOGD(TAG, "therapy stop while %s — ignoring",
                  therapy_alert_state_str(st));
@@ -809,14 +979,81 @@ static void handle_ble_disconnect(void)
     }
 }
 
+/* High-leak evaluation — owner task only, called on the fast tick and on
+ * therapy-start/stop/disconnect/config events.
+ *
+ * State machine:  DISABLED → IDLE → WARMING → WATCHING → ALERTED
+ *                                     ↑                      │
+ *                                     └────── re-arm ────────┘
+ *                ALERTED → WARMING on acknowledge (buffer reset → refill)
+ * Re-arm from ALERTED needs roll_avg < thresh − LEAK_REARM_DROP_LPM so a
+ * value hovering at the threshold cannot flap the alert on and off. */
+static void evaluate_leak(void)
+{
+    if (!s_cfg.enabled || !s_leak_cfg.enabled || !s_leak_roll_fn) {
+        set_leak_state(LEAK_ST_DISABLED);
+        return;
+    }
+    if (!therapy_is_active() || !currently_in_window()) {
+        set_leak_state(LEAK_ST_IDLE);
+        return;
+    }
+
+    float roll_lpm = 0.0f;
+    bool  ready    = false;
+    s_leak_roll_fn(&roll_lpm, &ready);
+    const float thresh    = (float)s_leak_cfg.thresh_lpm;
+    const float rearm_at  = thresh - LEAK_REARM_DROP_LPM;
+
+    switch (s_leak_st) {
+    case LEAK_ST_ALERTED:
+        if (!ready) {
+            /* Buffer was reset (ack) or the stream went stale — wait for a
+             * fresh full window before judging again. */
+            set_leak_state(LEAK_ST_WARMING);
+        } else if (roll_lpm < rearm_at) {
+            ESP_LOGI(TAG, "leak recovered (avg %.1f < %.1f) — re-armed",
+                     (double)roll_lpm, (double)rearm_at);
+            set_leak_state(LEAK_ST_WATCHING);
+        }
+        break;
+    case LEAK_ST_WARMING:
+        if (ready) set_leak_state(LEAK_ST_WATCHING);
+        /* fall through: a window that completes already ≥ threshold fires */
+        /* FALLTHROUGH */
+    case LEAK_ST_WATCHING:
+        if (ready && roll_lpm >= thresh) {
+            ESP_LOGW(TAG, "HIGH LEAK: %.1f L/min ≥ %.1f — alerting",
+                     (double)roll_lpm, (double)thresh);
+            set_leak_state(LEAK_ST_ALERTED);
+            start_alert_routine(ROUTINE_LEAK, roll_lpm, s_leak_cfg.thresh_lpm);
+        }
+        break;
+    default:
+        set_leak_state(ready ? LEAK_ST_WATCHING : LEAK_ST_WARMING);
+        break;
+    }
+}
+
 static void handle_ack(void)
 {
     alert_state_t st = s_state;
-    if (st == ALERT_DISARMED || st == ALERT_ACKED) return;
+    if (st != ALERT_DISARMED && st != ALERT_ACKED) {
+        ESP_LOGI(TAG, "acknowledged (was %s)", therapy_alert_state_str(st));
+        cancel_alert_routine();
+        set_state(ALERT_ACKED);
+    }
 
-    ESP_LOGI(TAG, "acknowledged (was %s)", therapy_alert_state_str(st));
-    cancel_alert_routine();
-    set_state(ALERT_ACKED);
+    /* Leak alert: ack clears the latch and resets the rolling window —
+     * ~2 min of silence while it refills, then a still-high leak re-alerts.
+     * Only reset when actually alerted: an idle button press must not open
+     * a protection gap. */
+    if (s_leak_st == LEAK_ST_ALERTED) {
+        ESP_LOGI(TAG, "leak alert acknowledged — resetting rolling window");
+        cancel_alert_routine();
+        if (s_leak_reset_fn) s_leak_reset_fn();
+        set_leak_state(LEAK_ST_WARMING);
+    }
 }
 
 /* ── Owner task ─────────────────────────────────────────────────────── */
@@ -834,10 +1071,20 @@ static void alert_owner_task(void *arg)
     int ticks = 0;
 
     for (;;) {
+        /* Poll the rolling leak window every 5 s only while a session that
+         * could alert is live; otherwise keep the leisurely 30 s window
+         * re-evaluation tick. */
+        bool leak_live = s_cfg.enabled && s_leak_cfg.enabled &&
+                         s_leak_roll_fn != NULL &&
+                         s_leak_st != LEAK_ST_DISABLED &&
+                         s_leak_st != LEAK_ST_IDLE;
         alert_evt_t ev;
-        if (xQueueReceive(s_evt_q, &ev, pdMS_TO_TICKS(ALERT_TICK_MS)) != pdTRUE) {
+        if (xQueueReceive(s_evt_q, &ev,
+                          pdMS_TO_TICKS(leak_live ? LEAK_TICK_MS : ALERT_TICK_MS))
+                != pdTRUE) {
             reap_finished_routines();
             reevaluate_state();
+            evaluate_leak();
             if (++ticks >= report_every) {
                 ticks = 0;
                 report_stack_headroom("hourly");
@@ -848,15 +1095,19 @@ static void alert_owner_task(void *arg)
         switch ((alert_evt_type_t)ev.type) {
         case EVT_TICK:
             reevaluate_state();
+            evaluate_leak();
             break;
         case EVT_THERAPY_START:
             handle_therapy_start();
+            evaluate_leak();
             break;
         case EVT_THERAPY_STOP:
             handle_therapy_stop();
+            evaluate_leak();
             break;
         case EVT_BLE_DISCONNECT:
             handle_ble_disconnect();
+            evaluate_leak();
             break;
         case EVT_ACK:
             handle_ack();
@@ -864,6 +1115,7 @@ static void alert_owner_task(void *arg)
         case EVT_CONFIG:
             promote_staged_config();
             reevaluate_state();
+            evaluate_leak();
             break;
         case EVT_ROUTINE_STATE:
             /* Ignore requests from a superseded routine. */
@@ -921,8 +1173,25 @@ esp_err_t therapy_alert_init(void)
         ESP_LOGI(TAG, "no saved config, using defaults");
     }
 
+    /* Leak config is a separate blob — missing means feature off. */
+    {
+        esp_err_t lerr = s_nvs_exec ? s_nvs_exec(do_load_leak, &s_leak_cfg)
+                                    : do_load_leak(&s_leak_cfg);
+        if (lerr == ESP_OK) {
+            if (s_leak_cfg.thresh_lpm < LEAK_THRESH_MIN)
+                s_leak_cfg.thresh_lpm = LEAK_THRESH_MIN;
+            ESP_LOGI(TAG, "leak config loaded: en=%d thresh=%d",
+                     s_leak_cfg.enabled, s_leak_cfg.thresh_lpm);
+        } else {
+            s_leak_cfg = (leak_alert_config_t)LEAK_ALERT_DEFAULTS;
+            ESP_LOGI(TAG, "no saved leak config, using defaults (disabled)");
+        }
+        s_leak_cfg_staged = s_leak_cfg;
+    }
+
     s_cfg_staged = s_cfg;
     s_state = ALERT_DISARMED;
+    s_leak_st = LEAK_ST_DISABLED;
 
     /* The owner task's stack lives in PSRAM to save internal RAM.  The event
      * queue and its storage remain in .bss, so no synchronisation object in

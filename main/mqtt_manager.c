@@ -522,6 +522,7 @@ static void do_publish_state(void)
 
     /* 2. alert_state */
     cJSON_AddStringToObject(root, "alert_state", therapy_alert_state_str(therapy_alert_get_state()));
+    cJSON_AddStringToObject(root, "leak_state", therapy_alert_leak_state_str(therapy_alert_get_leak_state()));
 
     /* 3. as11_connected */
     bool as11_conn = (strcmp(as11_ble_get_status(), AS11_STATUS_PAIRED) == 0);
@@ -599,9 +600,11 @@ static void do_publish_live(void)
     if (live.leak_valid) {
         cJSON_AddNumberToObject(root, "leak_rate", live.leak_lpm);
         cJSON_AddNumberToObject(root, "leak_avg", live.leak_avg_lpm);
+        cJSON_AddNumberToObject(root, "leak_roll", live.leak_roll_lpm);
     } else {
         cJSON_AddNullToObject(root, "leak_rate");
         cJSON_AddNullToObject(root, "leak_avg");
+        cJSON_AddNullToObject(root, "leak_roll");
     }
     if (live.pressure_valid) cJSON_AddNumberToObject(root, "pressure", live.pressure_cmh2o);
     else cJSON_AddNullToObject(root, "pressure");
@@ -703,6 +706,12 @@ void mqtt_manager_on_therapy_stop(void)
 }
 
 void mqtt_manager_on_alert_state_changed(alert_state_t new_state)
+{
+    (void)new_state;
+    mqtt_manager_publish_state(true);
+}
+
+void mqtt_manager_on_leak_state_changed(leak_alert_state_t new_state)
 {
     (void)new_state;
     mqtt_manager_publish_state(true);
@@ -1002,7 +1011,24 @@ static void publish_discovery_payloads(void)
 
     publish_live_sensor("leak_rate", "Leak Rate", "L/min", "leak_valid", "mdi:air-filter");
     publish_live_sensor("leak_avg", "Session Average Leak", "L/min", "leak_valid", "mdi:air-filter");
+    publish_live_sensor("leak_roll", "Leak Rate (2-min Avg)", "L/min", "leak_valid", "mdi:air-filter");
     publish_live_sensor("pressure", "Mask Pressure", "cmH2O", "pressure_valid", "mdi:gauge");
+
+    /* binary_sensor / leak_alert — ON while a high-leak alert is latched */
+    {
+        cJSON *c = cJSON_CreateObject();
+        snprintf(uniq, sizeof(uniq), "%s_leak_alert", s_device_id);
+        cJSON_AddStringToObject(c, "name", "Leak Alert");
+        cJSON_AddStringToObject(c, "unique_id", uniq);
+        cJSON_AddStringToObject(c, "state_topic", s_state_topic);
+        cJSON_AddStringToObject(c, "value_template",
+                                "{{ 'ON' if value_json.leak_state == 'alerted' else 'OFF' }}");
+        cJSON_AddStringToObject(c, "payload_on", "ON");
+        cJSON_AddStringToObject(c, "payload_off", "OFF");
+        cJSON_AddStringToObject(c, "device_class", "problem");
+        cJSON_AddStringToObject(c, "icon", "mdi:mask");
+        publish_entity_discovery("binary_sensor", "leak_alert", c);
+    }
 }
 
 /* ── JSON Config API (REST) ──────────────────────────────────────────── */

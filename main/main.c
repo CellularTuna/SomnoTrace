@@ -236,6 +236,9 @@ void app_main(void)
     therapy_alert_set_beep_fn(bsp_audio_beep);
     therapy_alert_set_therapy_active_fn(bsp_display_is_therapy_active);
     therapy_alert_set_state_change_cb(mqtt_manager_on_alert_state_changed);
+    therapy_alert_set_leak_roll_fn(bsp_display_get_leak_roll);
+    therapy_alert_set_leak_reset_fn(bsp_display_reset_leak_window);
+    therapy_alert_set_leak_state_cb(mqtt_manager_on_leak_state_changed);
     therapy_alert_init();
 
     /* 5. Load config from NVS. */

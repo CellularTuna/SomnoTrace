@@ -1289,6 +1289,14 @@ cJSON *netprov_build_status_json(void)
     /* Therapy alert state */
     cJSON *alert = cJSON_AddObjectToObject(resp, "alert");
     cJSON_AddStringToObject(alert, "state", therapy_alert_state_str(therapy_alert_get_state()));
+    cJSON_AddStringToObject(alert, "leak", therapy_alert_leak_state_str(therapy_alert_get_leak_state()));
+    {
+        float roll_lpm = 0.0f;
+        bool roll_ready = false;
+        bsp_display_get_leak_roll(&roll_lpm, &roll_ready);
+        if (roll_lpm > 0.0f) cJSON_AddNumberToObject(alert, "leak_roll", roll_lpm);
+        else cJSON_AddNullToObject(alert, "leak_roll");
+    }
 
     /* MQTT status */
     cJSON *mqtt = cJSON_AddObjectToObject(resp, "mqtt");

@@ -37,6 +37,8 @@ typedef struct {
     bool pressure_valid;
     float leak_lpm;
     float leak_avg_lpm;
+    float leak_roll_lpm;      /* rolling 2-min average (L/min)          */
+    bool  leak_roll_ready;    /* rolling window full (LEAK_ROLL_SECS)   */
     float pressure_cmh2o;
 } bsp_live_stats_t;
 
@@ -58,6 +60,12 @@ void bsp_display_push_flow(float flow_lpm);
 void bsp_display_push_leak(float leak_lpm);
 void bsp_display_push_pressure(float pressure_cmh2o);
 void bsp_display_get_live_stats(bsp_live_stats_t *out);
+/* Rolling-window leak stats for the alert component.  *ready is true only
+ * once the window is full (2 min of samples) and the data is fresh. */
+void bsp_display_get_leak_roll(float *avg_lpm, bool *ready);
+/* Clear the rolling window.  Used by the alert acknowledge path: the
+ * buffer refills over ~2 min, after which a still-high leak re-alerts. */
+void bsp_display_reset_leak_window(void);
 void bsp_display_set_therapy_start_time(int64_t start_us);
 bool bsp_display_is_therapy_active(void);
 
