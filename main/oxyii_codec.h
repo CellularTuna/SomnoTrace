@@ -68,6 +68,25 @@ int oxyii_try_decode(const uint8_t *buf, int len, uint8_t *op, uint8_t *flag,
  * characters; otherwise "0000" (a NULL serial is treated as unknown). */
 void oxyii_auth_payload_for(const char *serial, uint32_t ts, uint8_t out16[16]);
 
+/* Candidate entry from a BLE scan table for paired-device selection. */
+typedef struct {
+    const char *addr;
+    const char *name;
+} ox_scan_cand_t;
+
+/* Match a scan table against the paired ring's identity in strict priority
+ * order (#302):
+ *   1. Exact BLE address match (paired_addr, case-insensitive)
+ *   2. Exact advertised BLE name match (paired_ble_name, when non-empty and
+ *      not the generic "O2Ring" placeholder)
+ *   3. Advertised name ends with the last 4 characters of paired_serial
+ *      preceded by a non-digit boundary (or exact 4-char name)
+ * Returns the matched index in [0, count), or -1 if no candidate matches. */
+int ox_find_paired_scan_idx(const ox_scan_cand_t *cands, int count,
+                            const char *paired_addr,
+                            const char *paired_ble_name,
+                            const char *paired_serial);
+
 #ifdef __cplusplus
 }
 #endif

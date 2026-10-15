@@ -112,3 +112,82 @@ void oxyii_auth_payload_for(const char *serial, uint32_t ts, uint8_t out16[16])
     for (int i = 0; i < 16; i++)
         out16[i] = key[i] ^ LEPUCLOUD_MD5[i];
 }
+
+/* ── Paired-device scan selection (#302) ────────────────────────────── */
+static int ascii_tolower_ch(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (c + ('a' - 'A')) : c;
+}
+
+static int ascii_strcasecmp(const char *a, const char *b)
+{
+    if (!a || !b) return a == b ? 0 : (a ? 1 : -1);
+    while (*a && *b) {
+        int ca = ascii_tolower_ch((unsigned char)*a);
+        int cb = ascii_tolower_ch((unsigned char)*b);
+        if (ca != cb) return ca - cb;
+        a++;
+        b++;
+    }
+    return ascii_tolower_ch((unsigned char)*a) -
+           ascii_tolower_ch((unsigned char)*b);
+}
+
+int ox_find_paired_scan_idx(const ox_scan_cand_t *cands, int count,
+                            const char *paired_addr,
+                            const char *paired_ble_name,
+                            const char *paired_serial)
+{
+    if (!cands || count <= 0) return -1;
+
+    /* Pass 1: exact BLE MAC address match. */
+    if (paired_addr && paired_addr[0] != '\0') {
+        for (int i = 0; i < count; i++) {
+            if (cands[i].addr &&
+                ascii_strcasecmp(cands[i].addr, paired_addr) == 0) {
+                return i;
+            }
+        }
+    }
+
+    /* Pass 2: exact saved BLE advertised name match (handles MAC rotation
+     * after a ring factory reset).  Ignore the generic "O2Ring" fallback
+     * placeholder assigned when SCAN_RSP was absent. */
+    if (paired_ble_name && paired_ble_name[0] != '\0' &&
+        ascii_strcasecmp(paired_ble_name, "O2Ring") != 0) {
+        for (int i = 0; i < count; i++) {
+            if (cands[i].name &&
+                ascii_strcasecmp(cands[i].name, paired_ble_name) == 0) {
+                return i;
+            }
+        }
+    }
+
+    /* Pass 3: 4-character serial suffix match at the end of the advertised
+     * name (e.g. serial "25B2301404" -> "SHQO2Pro 1404" or "Oxyfit 1404"),
+     * in case SCAN_RSP was missed during pairing so paired_ble_name was
+     * synthesized as "O2Ring 1404" and the MAC later rotated. */
+    if (paired_serial) {
+        size_t slen = strlen(paired_serial);
+        if (slen >= 4) {
+            const char *suffix = paired_serial + slen - 4;
+            for (int i = 0; i < count; i++) {
+                const char *name = cands[i].name;
+                if (!name || !name[0] ||
+                    ascii_strcasecmp(name, "O2Ring") == 0) {
+                    continue;
+                }
+                size_t nlen = strlen(name);
+                if (nlen < 4) continue;
+                if (ascii_strcasecmp(name + nlen - 4, suffix) != 0)
+                    continue;
+                if (nlen == 4 ||
+                    !(name[nlen - 5] >= '0' && name[nlen - 5] <= '9')) {
+                    return i;
+                }
+            }
+        }
+    }
+
+    return -1;
+}

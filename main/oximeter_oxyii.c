@@ -297,6 +297,7 @@ static ox_probe_mode_t s_probe_mode = OX_PROBE_PERSISTENT;
 /* BLE connection state */
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_connect_event_handle = BLE_HS_CONN_HANDLE_NONE; /* saved in CONNECT event before DISCONNECT can overwrite */
+static volatile bool s_connecting = false;
 static uint16_t s_negotiated_mtu = 23;  /* updated by on_mtu / BLE_GAP_EVENT_MTU */
 static uint16_t s_write_handle;
 static uint16_t s_notify_handle;
@@ -386,17 +387,20 @@ static bool parse_addr(const char *str, ble_addr_t *out)
     return true;
 }
 
-/* Find the scan result whose address matches s_paired_addr.
- * Returns the index, or -1 if not found. */
+/* Find the scan result matching the paired ring (by MAC, saved BLE name,
+ * or 4-digit serial suffix).  Returns the index, or -1 if not found. */
 static int find_paired_in_scan(void)
 {
-    for (int i = 0; i < s_scan_count; i++) {
-        char addr_str[18];
-        addr_to_str(&s_scan[i].addr, addr_str, sizeof(addr_str));
-        if (strcmp(addr_str, s_paired_addr) == 0)
-            return i;
+    char addr_strs[OX_SCAN_MAX][18];
+    ox_scan_cand_t cands[OX_SCAN_MAX];
+    int n = s_scan_count < OX_SCAN_MAX ? s_scan_count : OX_SCAN_MAX;
+    for (int i = 0; i < n; i++) {
+        addr_to_str(&s_scan[i].addr, addr_strs[i], sizeof(addr_strs[i]));
+        cands[i].addr = addr_strs[i];
+        cands[i].name = s_scan[i].name;
     }
-    return -1;
+    return ox_find_paired_scan_idx(cands, n,
+                                   s_paired_addr, s_ble_name, s_serial);
 }
 
 /* ── GAP event handler ─────────────────────────────────────────────── */
@@ -544,6 +548,19 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_CONNECT:
+        if (!s_connecting) {
+            /* Late connection completion after do_connect_and_discover()
+             * already timed out (#302).  Terminate immediately so the
+             * connection slot in NimBLE is not leaked. */
+            if (event->connect.status == 0 &&
+                event->connect.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+                ESP_LOGW(TAG, "late connect after timeout (handle=%d) — terminating",
+                         event->connect.conn_handle);
+                ble_gap_terminate(event->connect.conn_handle,
+                                  BLE_ERR_REM_USER_CONN_TERM);
+            }
+            return 0;
+        }
         s_connect_event_handle = event->connect.conn_handle;
         s_conn_handle = event->connect.conn_handle;
         s_conn_status = event->connect.status;
@@ -671,10 +688,36 @@ static int on_write_done(uint16_t conn, const struct ble_gatt_error *err,
 }
 
 /* ── Connect and discover GATT services ────────────────────────────── */
+static void do_disconnect(void)
+{
+    if (ble_gap_conn_active()) {
+        ble_gap_conn_cancel();
+        xSemaphoreTake(s_conn_sem, pdMS_TO_TICKS(1000));
+    }
+    uint16_t h = s_conn_handle;
+    if (h == BLE_HS_CONN_HANDLE_NONE)
+        h = s_connect_event_handle;
+    if (h != BLE_HS_CONN_HANDLE_NONE) {
+        if (ble_gap_terminate(h, BLE_ERR_REM_USER_CONN_TERM) == 0)
+            xSemaphoreTake(s_conn_sem, pdMS_TO_TICKS(3000));
+        s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        s_connect_event_handle = BLE_HS_CONN_HANDLE_NONE;
+    }
+    oxyii_crypto_reset();
+}
+
 /* do_mtu=false skips MTU exchange (persistent-mode contact polling uses
  * only tiny LIVE_B frames that fit in the default 23-byte ATT MTU). */
 static esp_err_t do_connect_and_discover(ble_addr_t *target, bool do_mtu)
 {
+    /* Ensure any leftover connection or in-flight connect procedure from a
+     * previous attempt is torn down before clearing s_conn_handle (#302). */
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE ||
+        s_connect_event_handle != BLE_HS_CONN_HANDLE_NONE ||
+        ble_gap_conn_active()) {
+        do_disconnect();
+    }
+
     s_write_handle = s_notify_handle = s_cccd_handle = 0;
     s_svc_start = s_svc_end = 0;
     s_resp_len = 0;
@@ -698,12 +741,25 @@ static esp_err_t do_connect_and_discover(ble_addr_t *target, bool do_mtu)
         return ESP_FAIL;
     }
     clear_op_sem();
+    s_connecting = true;
     rc = ble_gap_connect(own_addr_type, target,
                          15000, NULL, gap_event, NULL);
-    if (rc != 0) { set_error("connect start failed: %d", rc); return ESP_FAIL; }
-    if (xSemaphoreTake(s_conn_sem, pdMS_TO_TICKS(16000)) != pdTRUE) {
-        set_error("connect timeout"); return ESP_FAIL;
+    if (rc != 0) {
+        s_connecting = false;
+        set_error("connect start failed: %d", rc);
+        return ESP_FAIL;
     }
+    if (xSemaphoreTake(s_conn_sem, pdMS_TO_TICKS(16000)) != pdTRUE) {
+        s_connecting = false;
+        ble_gap_conn_cancel();
+        /* Wait briefly for cancel/connect completion and clean up if the
+         * link established just as the timeout fired (#302). */
+        xSemaphoreTake(s_conn_sem, pdMS_TO_TICKS(1000));
+        do_disconnect();
+        set_error("connect timeout");
+        return ESP_FAIL;
+    }
+    s_connecting = false;
     if (s_conn_status != 0 || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         /* Race: the ring connected and immediately disconnected (e.g.
          * 0x3B "Unacceptable Connection Parameters") before we woke up.
@@ -804,15 +860,6 @@ static esp_err_t do_connect_and_discover(ble_addr_t *target, bool do_mtu)
     }
     ESP_LOGI(TAG, "notifications enabled (cccd=%d)", s_cccd_handle);
     return ESP_OK;
-}
-
-static void do_disconnect(void)
-{
-    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        xSemaphoreTake(s_conn_sem, pdMS_TO_TICKS(3000));
-    }
-    oxyii_crypto_reset();
 }
 
 /* ── Protocol request/response ─────────────────────────────────────── */
@@ -1573,7 +1620,15 @@ static void pull_task(void *arg)
             continue;
         }
 
-        if (s_scan_count == 0) {
+        /* Select the paired device from scan results (#302).  Matches by
+         * stored MAC, saved BLE name, or 4-digit serial suffix.  Never
+         * falls back to an unrelated device (e.g. ER1-LW ECG Holter). */
+        int idx = (s_scan_count > 0) ? find_paired_in_scan() : -1;
+        if (idx < 0) {
+            if (s_scan_count > 0) {
+                ESP_LOGD(TAG, "paired ring (%s / '%s') not in %d scan result(s) — ignoring other device(s)",
+                         s_paired_addr, s_ble_name, s_scan_count);
+            }
             if (s_ring_present)
                 ESP_LOGI(TAG, "ring gone — next appearance is a new sync window");
             s_ring_present = false;
@@ -1587,19 +1642,11 @@ static void pull_task(void *arg)
             continue;
         }
 
-        /* Select the paired device from scan results.  On first boot
-         * after pairing, s_paired_addr holds the address from the pair
-         * scan.  MAC can rotate on factory reset, so if the stored
-         * address isn't found, fall back to the first result (the
-         * serial check in do_pull_and_mark is the ultimate gate). */
-        int idx = find_paired_in_scan();
-        if (idx < 0) {
-            if (s_paired_addr[0] != '\0') {
-                ESP_LOGW(TAG, "paired addr %s not in scan results; "
-                         "using first device (serial will be verified)",
-                         s_paired_addr);
-            }
-            idx = 0;
+        char cand_addr[18];
+        addr_to_str(&s_scan[idx].addr, cand_addr, sizeof(cand_addr));
+        if (s_paired_addr[0] != '\0' && strcmp(cand_addr, s_paired_addr) != 0) {
+            ESP_LOGI(TAG, "paired addr %s not in scan; matched '%s' at %s (serial will be verified)",
+                     s_paired_addr, s_scan[idx].name, cand_addr);
         }
 
         if (!s_ring_present) {
@@ -1607,9 +1654,6 @@ static void pull_task(void *arg)
                      s_scan[idx].name, s_scan[idx].rssi);
             s_ring_present = true;
         }
-
-        /* Remember last seen addr (hint; MAC can rotate on factory reset). */
-        addr_to_str(&s_scan[idx].addr, s_paired_addr, sizeof(s_paired_addr));
 
         if (s_presence_served) {
             /* Never reconnect during END — a connection resets the
@@ -1688,6 +1732,7 @@ static void pull_task(void *arg)
                                  serial, s_serial);
                         break;
                     }
+                    strlcpy(s_paired_addr, cand_addr, sizeof(s_paired_addr));
 
                     if (oxyii_prepare_files() != ESP_OK) {
                         ESP_LOGW(TAG, "watch: file prep failed");
@@ -1809,6 +1854,7 @@ static void pull_task(void *arg)
             xSemaphoreGive(s_ops_mtx);
             continue;
         }
+        strlcpy(s_paired_addr, cand_addr, sizeof(s_paired_addr));
 
         /* Pull only in the documented no-contact END window
          * (LIVE_B [5] == 0x00). On-finger / unknown / F1-wedge: drop

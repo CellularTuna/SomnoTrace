@@ -215,6 +215,95 @@ static void test_encode_refuses_a_buffer_too_small(void)
           "a 24-byte frame does not fit in 23");
 }
 
+/* Regression coverage for #302: background scan selection must never fall
+ * back to an unrelated Wellue device (e.g. ER1-W 0919 ECG Holter or a
+ * second household ring) when the paired ring is asleep, while still
+ * supporting MAC rotation after factory reset and unofficial ring models. */
+static void test_paired_scan_selection_issue_302(void)
+{
+    /* 1. Only ER1-W 0919 (ECG Holter) is advertising while paired SHQO2Pro
+     * 1404 is off/charging -> must return -1 (ignore), NOT index 0. */
+    const ox_scan_cand_t only_ecg[] = {
+        { .addr = "cc:b8:ad:03:05:06", .name = "ER1-W 0919" },
+    };
+    CHECK(ox_find_paired_scan_idx(only_ecg, 1,
+                                  "de:5e:be:8d:26:ef",
+                                  "SHQO2Pro 1404",
+                                  "25B2301404") == -1,
+          "unrelated ER1-W 0919 must not be selected when paired ring is absent");
+
+    /* 2. Both ER1-W 0919 and SHQO2Pro 1404 in scan -> selects SHQO2Pro 1404
+     * at index 1 by MAC. */
+    const ox_scan_cand_t both[] = {
+        { .addr = "cc:b8:ad:03:05:06", .name = "ER1-W 0919" },
+        { .addr = "de:5e:be:8d:26:ef", .name = "SHQO2Pro 1404" },
+    };
+    CHECK(ox_find_paired_scan_idx(both, 2,
+                                  "de:5e:be:8d:26:ef",
+                                  "SHQO2Pro 1404",
+                                  "25B2301404") == 1,
+          "exact MAC match selects index 1 even when ER1-W is index 0");
+
+    /* 3. Paired ring missed SCAN_RSP in this window (name is generic "O2Ring"
+     * placeholder), but MAC matches -> still selected by Pass 1. */
+    const ox_scan_cand_t no_scan_rsp[] = {
+        { .addr = "de:5e:be:8d:26:ef", .name = "O2Ring" },
+    };
+    CHECK(ox_find_paired_scan_idx(no_scan_rsp, 1,
+                                  "de:5e:be:8d:26:ef",
+                                  "SHQO2Pro 1404",
+                                  "25B2301404") == 0,
+          "MAC match works even when SCAN_RSP name is missing");
+
+    /* 4. Paired ring was factory-reset (MAC rotated), advertises its saved
+     * BLE name alongside ER1-W 0919 -> Pass 2 selects index 1 by ble_name. */
+    const ox_scan_cand_t mac_rotated[] = {
+        { .addr = "cc:b8:ad:03:05:06", .name = "ER1-W 0919" },
+        { .addr = "f1:22:33:44:55:66", .name = "SHQO2Pro 1404" },
+    };
+    CHECK(ox_find_paired_scan_idx(mac_rotated, 2,
+                                  "de:5e:be:8d:26:ef",
+                                  "SHQO2Pro 1404",
+                                  "25B2301404") == 1,
+          "Pass 2 matches saved BLE name after MAC rotation");
+
+    /* 5. Unofficial/budget model (e.g. Oxyfit / O2 Flex from #257/#288) paired
+     * when SCAN_RSP was missed (saved ble_name="O2Ring 0563", serial="2407500563"),
+     * then MAC rotates and it advertises as "Oxyfit 0563" -> Pass 3 matches by
+     * 4-digit serial suffix. */
+    const ox_scan_cand_t unofficial_rotated[] = {
+        { .addr = "cc:b8:ad:03:05:06", .name = "ER1-W 0919" },
+        { .addr = "e2:11:22:33:44:55", .name = "Oxyfit 0563" },
+    };
+    CHECK(ox_find_paired_scan_idx(unofficial_rotated, 2,
+                                  "aa:bb:cc:dd:ee:ff",
+                                  "O2Ring 0563",
+                                  "2407500563") == 1,
+          "Pass 3 matches unofficial model by 4-digit serial suffix after MAC rotation");
+
+    /* 6. Partner's second ring of the same model ("SHQO2Pro 5678") is awake
+     * while paired "SHQO2Pro 1404" is asleep -> must return -1. */
+    const ox_scan_cand_t partner_ring[] = {
+        { .addr = "e8:99:88:77:66:55", .name = "SHQO2Pro 5678" },
+    };
+    CHECK(ox_find_paired_scan_idx(partner_ring, 1,
+                                  "de:5e:be:8d:26:ef",
+                                  "SHQO2Pro 1404",
+                                  "25B2301404") == -1,
+          "second household ring with different serial suffix must not match");
+
+    /* 7. Generic "O2Ring" placeholder at an unknown MAC must never match by
+     * name or suffix. */
+    const ox_scan_cand_t unknown_anon[] = {
+        { .addr = "cc:b8:ad:03:05:06", .name = "O2Ring" },
+    };
+    CHECK(ox_find_paired_scan_idx(unknown_anon, 1,
+                                  "de:5e:be:8d:26:ef",
+                                  "O2Ring",
+                                  "25B2301404") == -1,
+          "anonymous O2Ring placeholder at unknown MAC must not match");
+}
+
 int main(void)
 {
     test_crc8_matches_the_published_check_value();
@@ -228,6 +317,7 @@ int main(void)
     test_decode_rejects_bad_frames();
     test_decode_reports_true_length_when_capped();
     test_encode_refuses_a_buffer_too_small();
+    test_paired_scan_selection_issue_302();
 
     if (g_failures) {
         printf("oxyii_codec tests FAILED (%d)\n", g_failures);
