@@ -87,7 +87,9 @@ body{background:var(--bg);color:var(--text);transition:background .2s,color .2s;
 header{background:var(--card-bg);border-bottom:1px solid var(--card-border);padding:0 max(16px,calc((100% - 1440px)/2));height:56px;display:flex;align-items:center;justify-content:space-between;gap:16px;position:sticky;top:0;z-index:100}
 .brand{display:flex;align-items:center;gap:8px;text-decoration:none}
 .brand img{height:38px;width:auto;display:block}
+.brand .brand-icon{display:none;height:30px;width:auto}
 .setup-badge{display:none;font-size:.7rem;font-weight:600;color:var(--warning);background:rgba(251,191,36,.12);padding:2px 8px;border-radius:10px;margin-left:8px}
+.device-name-badge{display:none;font-size:.7rem;font-weight:600;color:var(--primary);background:var(--primary-glow);padding:2px 8px;border-radius:10px;margin-left:8px;white-space:nowrap}
 .nav-tabs{display:flex;gap:4px;height:100%;align-items:center}
 .tab-btn{background:none;border:none;color:var(--text-muted);padding:8px 14px;font-size:.9rem;font-weight:500;cursor:pointer;border-radius:6px;transition:all .2s;height:38px;display:flex;align-items:center}
 .tab-btn:hover{color:var(--text);background:var(--input-bg)}
@@ -393,6 +395,16 @@ body.fixed-height .logs-container {
   min-height: 0;
 }
 
+/* With a custom device name the wordmark + chip make the single-row
+ * header ~970 px wide — it overflows and clips the theme selector before
+ * the 900 px wrap breakpoint is reached. Swap the wordmark for the small
+ * icon over a wider band so icon+chip+tabs+theme fits in one row; below
+ * 900 px the same swap applies inside the two-row layout. */
+@media(max-width:1100px){
+header.has-name .brand-full{display:none}
+header.has-name .brand-icon{display:block}
+}
+
 @media(max-width:900px){
 header{flex-direction:row;flex-wrap:wrap;height:auto;padding:10px 12px;gap:6px;align-items:center}
 .brand{order:1}
@@ -452,9 +464,11 @@ body.fixed-height .logs-container{height:calc(100dvh - 145px);min-height:340px}
 
 <header>
 <a href="#" class="brand">
-<img src="/logo.svg" alt="SomnoTrace">
+<img src="/logo.svg" alt="SomnoTrace" class="brand-full">
+<img src="/favicon.svg" alt="" class="brand-icon">
 <span class="setup-badge" id="setup-badge">Setup Mode</span>
 <span id="dash-loading-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:var(--primary);margin-left:6px;animation:pulse 1s infinite" title="Loading session data…"></span>
+<span class="device-name-badge" id="device-name-badge"></span>
 </a>
 <div class="nav-tabs" id="nav-tabs" role="tablist">
 <button class="tab-btn active" role="tab" id="tab-btn-dashboard" aria-selected="true" onclick="switchTab('dashboard')">Dashboard</button>
@@ -510,9 +524,9 @@ Wi-Fi Configuration
 </div>
 <div class="form-group" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--card-border)">
 <label>Device Name (mDNS)</label>
-<p class="card-desc" style="margin:2px 0 8px 0">Custom hostname for accessing the web portal. The device will be reachable at <code>&lt;name&gt;.local</code>. Requires save and reboot.</p>
+<p class="card-desc" style="margin:2px 0 8px 0">Custom hostname for the web portal — also shown in the page header and browser tab title. Reachable at <code>&lt;name&gt;.local</code>. Letters (capitals allowed), digits and hyphens; names differing only by case count as the same device. Requires save and reboot.</p>
 <div style="display:flex;align-items:center;gap:8px">
-<input type="text" id="mdns-name" class="form-control" style="max-width:18ch;text-transform:lowercase" maxlength="10" pattern="[a-z0-9-]+" placeholder="somnotrace" data-dirty="false" oninput="markDirty(this)" spellcheck="false" autocapitalize="none">
+<input type="text" id="mdns-name" class="form-control" style="max-width:18ch" maxlength="10" pattern="[a-zA-Z0-9-]+" placeholder="somnotrace" data-dirty="false" oninput="markDirty(this)" spellcheck="false" autocapitalize="none">
 <span style="color:var(--text);white-space:nowrap;user-select:none">.local</span>
 </div>
 </div>
@@ -2120,7 +2134,29 @@ function formatSdSpace(total, free) {
   return g(free) + '/' + g(total) + ' free (' + pct + '%)';
 }
 
+/* Show the configured mDNS device name in the header (badge next to the
+ * logo) and the browser tab title, so users running several units can tell
+ * them apart. Hidden when the name is still the default — case-insensitive
+ * because mDNS itself is. */
+function applyDeviceName(d) {
+  var name = (d && d.mdns_name) ? d.mdns_name : '';
+  var isCustom = name !== '' && name.toLowerCase() !== 'somnotrace';
+  var badge = document.getElementById('device-name-badge');
+  if (badge) {
+    badge.textContent = isCustom ? name : '';
+    badge.style.display = isCustom ? 'inline-block' : 'none';
+  }
+  var hdr = document.querySelector('header');
+  if (hdr) hdr.classList.toggle('has-name', isCustom);
+  document.title = isCustom ? name + ' — SomnoTrace' : 'SomnoTrace';
+  /* Cache it so the next page load can render the badge and do the
+   * mobile icon swap before the first /api/status response arrives —
+   * otherwise the wordmark/icon swap visibly flickers on small screens. */
+  try { localStorage.setItem('somnotrace_devname', name); } catch(e) {}
+}
+
 function loadStatusTab(d) {
+  applyDeviceName(d);
   function setEl(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; }
   setEl('status-fw', d.fw_ver || '--');
   /* Which repository this firmware was built from. Absent on builds from before the
@@ -2316,7 +2352,7 @@ function saveAll() {
     var ntpInput = document.getElementById('ntp-server');
     if (ntpInput) body += '&ntp_srv=' + encodeURIComponent(ntpInput.value.trim());
     var mdnsInput = document.getElementById('mdns-name');
-    if (mdnsInput) body += '&mdns_name=' + encodeURIComponent(mdnsInput.value.trim().toLowerCase());
+    if (mdnsInput) body += '&mdns_name=' + encodeURIComponent(mdnsInput.value.trim());
 
     promises.push(
       fetch('/save', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
@@ -2334,7 +2370,7 @@ function saveAll() {
     }
     if (ntpInput) tzBody += '&ntp_srv=' + encodeURIComponent(ntpInput.value.trim());
     var mdnsInput = document.getElementById('mdns-name');
-    if (mdnsInput) tzBody += '&mdns_name=' + encodeURIComponent(mdnsInput.value.trim().toLowerCase());
+    if (mdnsInput) tzBody += '&mdns_name=' + encodeURIComponent(mdnsInput.value.trim());
     if (tzBody) {
       tzBody = 'tz_only=1' + tzBody;
       promises.push(
@@ -6836,6 +6872,7 @@ function loadSomnostageCredit() {
 
 window.onload = function() {
   setTheme(localStorage.getItem('somnotrace_theme') || 'night');
+  applyDeviceName({ mdns_name: localStorage.getItem('somnotrace_devname') || '' });
   /* With a web password set, show nothing but the login screen until the
    * session is valid; otherwise every request below would just get 401. */
   fetch('/api/auth/status', { cache: 'no-store' }).then(function(r) { return r.json(); })
