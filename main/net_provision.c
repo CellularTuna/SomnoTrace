@@ -2939,8 +2939,15 @@ static void ota_flash_task(void *arg)
         return;
     }
 
+    /* OTA_WITH_SEQUENTIAL_WRITES makes esp_ota_write erase each sector
+     * lazily as the stream reaches it (~25 ms per 4 KB), instead of one
+     * upfront esp_partition_erase_range that freezes the SPI flash for
+     * ~10-20 s: the producer (httpd, PSRAM stack) and lwIP stop dead, the
+     * browser's TCP stalls, and the first upload attempt dies at ~22 KB
+     * with "stream buffer timeout". esp_ota_end() still validates the
+     * written image; OTA_MAX_SIZE is enforced by the handler. */
     esp_ota_handle_t ota_hdl = 0;
-    esp_err_t err = esp_ota_begin(part, ctx->total_size, &ota_hdl);
+    esp_err_t err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &ota_hdl);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA: begin failed: %s", esp_err_to_name(err));
         ctx->result = err;
