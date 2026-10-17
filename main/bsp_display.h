@@ -52,6 +52,9 @@ void bsp_display_show_lines(const char *title, const char *const *lines, int n_l
 void bsp_display_set_notice(const char *text);
 void bsp_display_set_wifi_connected(bool connected);
 void bsp_display_set_as11_paired(bool paired);
+/* Amber download badge in the status header: a newer stable release exists
+ * on the repo this firmware was built from. */
+void bsp_display_set_update_available(bool available);
 void bsp_display_set_battery(int percent, bool charging, bool valid);
 
 /* Therapy graph mode */

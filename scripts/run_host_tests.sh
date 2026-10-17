@@ -158,6 +158,7 @@ run_test upload_park_test -I"$UPLOADER_DIR" scripts/upload_park_test.c
 run_test as11_reconnect_test -I"$SHIM" -I"$MAIN_DIR" scripts/as11_reconnect_test.c "$MAIN_DIR/as11_reconnect.c"
 run_test leak_roll_test     -I"$SHIM" -I"$MAIN_DIR" scripts/leak_roll_test.c "$MAIN_DIR/leak_roll.c"
 run_test as11_adv_test       -I"$SHIM" -I"$MAIN_DIR" scripts/as11_adv_test.c "$MAIN_DIR/as11_adv.c"
+run_test update_check_test   -I"$SHIM" -I"$MAIN_DIR" scripts/update_check_test.c "$MAIN_DIR/update_check_core.c"
 run_test http_query_test     -I"$SHIM" -I"$MAIN_DIR" scripts/http_query_test.c "$MAIN_DIR/http_query.c" \
     scripts/test_include/httpd_query_shim.c
 

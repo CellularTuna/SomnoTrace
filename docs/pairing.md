@@ -8,7 +8,10 @@
 
 - Make sure **Wi-Fi is already configured** on SomnoTrace ([flashing guide](flashing.md)).
 - The AirSense 11 must be **powered on and in Bluetooth range** (within ~5–10 meters).
-- The AirSense 11 should **not already be connected to the ResMed MyAir app** over BLE. If it is, disconnect or turn off Bluetooth on the phone/tablet first — the AS11 can only maintain one BLE connection at a time.
+- The AirSense 11 must **not still be paired to the ResMed myAir app** — it can only maintain one BLE bond at a time, and while bound to a phone it may never advertise for SomnoTrace. Simply closing the app is not enough. To release it:
+  1. Unpair/remove the machine inside the **myAir app**, **and**
+  2. **Forget** the AirSense 11 in the phone's Bluetooth device list (iOS: Settings → Bluetooth → ⓘ → **Forget This Device**; Android: Settings → Bluetooth → ⚙ → **Unpair/Forget**).
+  - On Android, turning Bluetooth off is usually sufficient. On iPhone it is **not** — the Control Center Bluetooth toggle only disconnects temporarily (and turns itself back on the next day), so the device must actually be forgotten.
 
 ---
 
@@ -53,6 +56,6 @@ If successful, the card shows **Paired** and SomnoTrace is now bonded to the Air
 
 ## Troubleshooting
 
-- **No devices found:** Make sure the AirSense 11 is in pairing mode and that the MyAir app is not currently connected to it.
+- **No devices found:** Make sure the AirSense 11 is in pairing mode. If it never appears in the scan, it is probably still bonded to a phone — remove it from the myAir app and from the phone's paired Bluetooth devices (see *Before You Start*), then start the AS11 pairing flow again.
 - **Pair fails after entering the code:** Check the passkey carefully and try again. If it keeps failing, unpair from any other app first and restart the pairing flow.
 - **Need to re-pair:** Click **Unpair Device** in the web UI, then repeat the steps above.
