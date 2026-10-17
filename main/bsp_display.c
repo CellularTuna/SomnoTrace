@@ -85,6 +85,7 @@ static void fb_clear(uint16_t color);
 static int fb_draw_string_aa(int x, int y, const font_info_t *font, const char *str, uint16_t color);
 static void fb_draw_wifi_indicator(int x, int y, bool connected);
 static void fb_draw_ble_indicator(int x, int y);
+static void fb_draw_update_indicator(int x, int y);
 static void render_graph(void);
 static void render_info(void);
 static void render_status(void);
@@ -96,6 +97,7 @@ static esp_lcd_panel_io_handle_t s_io = NULL;
 static uint16_t *s_fb = NULL;
 static bool s_wifi_connected = false;
 static bool s_as11_paired = false;
+static bool s_update_available = false;
 static uint16_t s_rotation = 0;  /* current LCD rotation in degrees */
 static volatile bool s_rotation_pending = false;  /* set_rotation requested, deferred to render task */
 static uint16_t s_pending_rotation_deg = 0;       /* requested rotation (valid when s_rotation_pending) */
@@ -1537,6 +1539,43 @@ static void fb_draw_ble_indicator(int x, int y)
     }
 }
 
+/* Draw "update available" badge — bold down-arrow landing in a tray, amber.
+ * 9×13px, same 1px-bitmap style as fb_draw_ble_indicator. Sits in the free
+ * band between the clock and the battery indicator. */
+static void fb_draw_update_indicator(int x, int y)
+{
+    static const uint16_t bitmap[13] = {
+        0x038, /* ...###... */
+        0x038, /* ...###... */
+        0x038, /* ...###... */
+        0x038, /* ...###... */
+        0x139, /* #..###..# */
+        0x0BA, /* .#.###.#. */
+        0x07C, /* ..#####.. */
+        0x038, /* ...###... */
+        0x010, /* ....#.... */
+        0x000, /* ......... */
+        0x0FE, /* .#######. */
+        0x082, /* .#.....#. */
+        0x0FE, /* .#######. */
+    };
+    uint16_t col = rgb565(255, 190, 30);   /* amber — same as the notice banner */
+
+    for (int r = 0; r < 13; r++) {
+        uint16_t row = bitmap[r];
+        int py = y + r;
+        if (py < 0 || py >= LCD_V_RES) continue;
+        for (int c = 0; c < 9; c++) {
+            if (row & (1 << (8 - c))) {
+                int px = x + c;
+                if (px >= 0 && px < LCD_H_RES) {
+                    s_fb[py * LCD_H_RES + px] = col;
+                }
+            }
+        }
+    }
+}
+
 /* Draw battery percentage with an outline icon and prominent charging bolt.
  * Layout: [22×14px battery outline + 3×6px nub] [N% text]
  * x,y is the top-left of the battery outline. */
@@ -1612,6 +1651,7 @@ static void render_status(void)
     nlines = s_status_nlines;
     wifi = s_wifi_connected;
     bool as11_paired = s_as11_paired;
+    bool update_avail = s_update_available;
     int batt_pct = s_batt_percent;
     bool batt_chg = s_batt_charging;
     bool batt_valid = s_batt_valid;
@@ -1640,6 +1680,11 @@ static void render_status(void)
     /* AS11 BLE paired icon — Bluetooth rune to the left of WiFi bars */
     if (as11_paired) {
         fb_draw_ble_indicator(199, 11);
+    }
+
+    /* Firmware update badge — amber download arrow between clock and battery */
+    if (update_avail) {
+        fb_draw_update_indicator(60, 9);
     }
 
     /* Battery indicator — left of BLE icon, right of clock area */
@@ -1699,6 +1744,18 @@ static void render_status(void)
     }
 
     lcd_flush();
+}
+
+void bsp_display_set_update_available(bool available)
+{
+    if (!s_state_mutex) return;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_update_available != available) {
+        s_update_available = available;
+        s_status_dirty = true;
+    }
+    xSemaphoreGive(s_state_mutex);
+    if (s_display_task) xTaskNotifyGive(s_display_task);
 }
 
 void bsp_display_set_notice(const char *text)

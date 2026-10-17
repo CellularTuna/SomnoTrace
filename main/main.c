@@ -52,6 +52,7 @@
 #include "crash_diag.h"
 #include "therapy_alert.h"
 #include "mqtt_manager.h"
+#include "update_check.h"
 #include "nvs_flash.h"
 #include "somno_ml.h"
 #include "oximetry_canonical.h"
@@ -425,6 +426,7 @@ void app_main(void)
     /* ── Normal boot continuation (Wi-Fi connected or degraded mode) ─── */
     if (!in_softap) {
         mqtt_manager_init();
+        update_check_init();
         if (wifi_connected) {
             if (sd_storage_is_ready()) {
                 uploader_config_t upcfg;

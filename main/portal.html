@@ -3503,11 +3503,21 @@ function otaFetchLatest() {
   statusEl.textContent = 'Fetching latest release from GitHub…';
   statusEl.className = 'status-msg';
 
-  /* GitHub API: get all releases, sort by published_at desc, pick first.
-   * Uses /releases instead of /releases/latest because the latter 404s
-   * when the newest release is a prerelease. */
-  fetch('https://api.github.com/repos/ilyakruchinin/SomnoTrace/releases', {
-    headers: { 'Accept': 'application/vnd.github+json' }
+  /* Ask the firmware which repository it was built from — a fork's CI build
+   * carries its own slug (SNT_SOURCE_REPO), so the check must follow it.
+   * Local/unknown builds carry sentinels, not a slug: show a message. */
+  fetch('/api/status').then(function(r) { return r.json(); }).then(function(st) {
+    var srcRepo = (st && st.source_repo) || '';
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(srcRepo)) {
+      throw new Error('Cannot check for updates — this firmware was not built by GitHub Actions' +
+        (srcRepo ? ' (build origin: ' + srcRepo + ')' : '') + '.');
+    }
+    /* GitHub API: get all releases, sort by published_at desc, pick first.
+     * Uses /releases instead of /releases/latest because the latter 404s
+     * when the newest release is a prerelease. */
+    return fetch('https://api.github.com/repos/' + srcRepo + '/releases', {
+      headers: { 'Accept': 'application/vnd.github+json' }
+    });
   }).then(function(r) {
     if (!r.ok) throw new Error('GitHub API returned ' + r.status);
     return r.json();

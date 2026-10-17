@@ -76,6 +76,7 @@
 #include "psram_task.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include "update_check.h"
 #include "esp_https_ota.h"
 #include "mdns.h"
 #include "mqtt_manager.h"
@@ -1157,6 +1158,11 @@ cJSON *netprov_build_status_json(void)
 #ifdef SNT_UPSTREAM_REPO
     cJSON_AddStringToObject(resp, "upstream_repo", SNT_UPSTREAM_REPO);
 #endif
+    cJSON_AddBoolToObject(resp, "update_available", update_check_is_available());
+    const char *upd_tag = update_check_latest_tag();
+    if (upd_tag && upd_tag[0]) {
+        cJSON_AddStringToObject(resp, "latest_tag", upd_tag);
+    }
 
     if (!s_portal_mode) {
         /* Live link state: SSID, IP, RSSI — all derived from the event-driven
