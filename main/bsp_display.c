@@ -1682,9 +1682,11 @@ static void render_status(void)
         fb_draw_ble_indicator(199, 11);
     }
 
-    /* Firmware update badge — amber download arrow between clock and battery */
+    /* Firmware update badge — amber download arrow between clock and battery.
+     * y=13 bottom-aligns its 13px bitmap with the WiFi bars, BLE rune and
+     * battery outline (all end at y=25). */
     if (update_avail) {
-        fb_draw_update_indicator(60, 9);
+        fb_draw_update_indicator(60, 13);
     }
 
     /* Battery indicator — left of BLE icon, right of clock area */
