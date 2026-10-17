@@ -24,7 +24,6 @@
 #include "update_check_core.h"
 #include "bsp_display.h"
 #include "net_provision.h"
-#include "nvs_writer.h"
 #include "psram_task.h"
 
 #include <string.h>
@@ -37,7 +36,6 @@
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "nvs.h"
 
 static const char *TAG = "updchk";
 
@@ -47,8 +45,6 @@ static const char *TAG = "updchk";
 #define UPD_SOURCE_REPO ""
 #endif
 
-#define UPD_NVS_NS    "updchk"
-#define UPD_NVS_KEY   "tag"
 #define UPD_TAG_MAX   32
 #define UPD_URL_MAX   96
 #define UPD_LOC_MAX   256
@@ -77,25 +73,12 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-static void save_tag(const char *tag)
-{
-    nvs_writer_lock();
-    nvs_handle_t h;
-    if (nvs_open(UPD_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_str(h, UPD_NVS_KEY, tag);
-        nvs_commit(h);
-        nvs_close(h);
-    }
-    nvs_writer_unlock();
-}
-
 static void apply_state(bool avail, const char *tag)
 {
     s_update_available = avail;
     bsp_display_set_update_available(avail);
-    if (tag && strcmp(s_latest_tag, tag) != 0) {
+    if (tag) {
         strlcpy(s_latest_tag, tag, sizeof(s_latest_tag));
-        save_tag(tag);
     }
 }
 
@@ -179,19 +162,10 @@ void update_check_init(void)
     const esp_app_desc_t *d = esp_app_get_description();
     s_fw_ver = (d && d->version[0]) ? d->version : "unknown";
 
-    /* Restore the last-seen tag so the badge survives a reboot without
-     * waiting for the first poll. */
-    nvs_handle_t h;
-    if (nvs_open(UPD_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-        size_t n = sizeof(s_latest_tag);
-        nvs_get_str(h, UPD_NVS_KEY, s_latest_tag, &n);
-        nvs_close(h);
-    }
-    s_update_available = upd_is_update(s_latest_tag, s_fw_ver);
-    if (s_update_available) {
-        bsp_display_set_update_available(true);
-    }
-
+    /* Deliberately no persistence: a cached tag could stale-paint the badge
+     * after a firmware change (OTA flash leaves NVS untouched but changes
+     * esp_app_desc_t.version). The badge stays dark until the first live
+     * check ~3 min after boot. */
     if (!psram_task_create(update_check_task, "updchk", 6144, NULL,
                            4, tskNO_AFFINITY, NULL, NULL)) {
         ESP_LOGE(TAG, "failed to start checker task");
