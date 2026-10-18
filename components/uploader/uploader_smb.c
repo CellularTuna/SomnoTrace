@@ -598,6 +598,27 @@ static upload_result_t smb_put_oximetry(const upload_ox_ref_t *ref)
     return UPLOAD_ERR_PERMANENT;
 }
 
+static upload_result_t smb_stage_day_begin(const char *day)
+{
+    if (!s_smb || !day) return UPLOAD_ERR_TRANSIENT;
+    char path[640];
+    snprintf(path, sizeof(path), "%sSOMNOSTAGE", s_remote_base);
+    smb2_mkdir(s_smb, path);
+    snprintf(path, sizeof(path), "%sSOMNOSTAGE/%s", s_remote_base, day);
+    smb2_mkdir(s_smb, path);
+    return UPLOAD_OK;
+}
+
+static upload_result_t smb_put_stage(const upload_stage_ref_t *ref)
+{
+    if (!s_smb || !ref || !ref->unit_id[0] || !ref->csv_path[0])
+        return UPLOAD_ERR_TRANSIENT;
+    char path[760];
+    snprintf(path, sizeof(path), "%sSOMNOSTAGE/%s/%s.csv", s_remote_base,
+             ref->day, ref->unit_id);
+    return smb_upload_file(s_smb, ref->csv_path, path);
+}
+
 static upload_result_t smb_day_end(const char *day, bool any_uploaded)
 {
     (void)day;
@@ -610,6 +631,7 @@ const upload_backend_t smb_backend = {
     .label = "SMB Network Share",
     .bundle_only_ok = true,     /* plain file copy, no side effects */
     .supports_ox = true,
+    .supports_stage = true,
     .is_configured = smb_is_configured,
     .session_begin = smb_session_begin,
     .day_begin = smb_day_begin,
@@ -617,6 +639,9 @@ const upload_backend_t smb_backend = {
     .ox_day_begin = smb_ox_day_begin,
     .put_oximetry = smb_put_oximetry,
     .ox_day_end = smb_day_end,
+    .stage_day_begin = smb_stage_day_begin,
+    .put_stage = smb_put_stage,
+    .stage_day_end = smb_day_end,
     .put_bundle = smb_put_bundle,
     .day_end = smb_day_end,
     .session_end = smb_session_end,

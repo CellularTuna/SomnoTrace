@@ -33,6 +33,7 @@
 #include "somno_ml_internal.h"
 #include "somno_ml_features.h"
 #include "somno_ml_model.h"
+#include "somno_stage_csv.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -56,6 +57,7 @@ static const char *TAG = "somno_ml";
 
 #define OX_RECORDINGS   "/somnotrace/.somnotrace/oximetry/recordings"
 #define SD_STREAMS      "/somnotrace/.somnotrace/sessions/streams"
+#define SD_STAGES       "/somnotrace/.somnotrace/stages"
 
 #define MIN_VALID_EPOCHS 30
 #define JOB_QUEUE_LEN    8
@@ -111,6 +113,12 @@ static portMUX_TYPE s_live_mux = portMUX_INITIALIZER_UNLOCKED;
 static somno_ml_job_t s_as11_active;
 static bool s_as11_recording;
 static portMUX_TYPE s_as11_mux = portMUX_INITIALIZER_UNLOCKED;
+static somno_ml_stage_export_cb_t s_stage_export_cb;
+
+void somno_ml_set_stage_export_cb(somno_ml_stage_export_cb_t cb)
+{
+    s_stage_export_cb = cb;
+}
 
 void somno_ml_set_as11_active(const char *dir, const char *id, bool active)
 {
@@ -350,6 +358,79 @@ static bool sst_fresh(const char *sst_path, const char *src_path)
     return ss.st_mtime > sr.st_mtime;
 }
 
+/* Derive the consumer CSV path belonging to a .sst sidecar:
+ *   ring : OX_RECORDINGS/<day>/<rec_id>/generations/<g>/data/stages.sst
+ *          -> SD_STAGES/<day>/<rec_id>.csv
+ *   AS11 : SD_STREAMS/<day>/<prefix>_stages.sst
+ *          -> SD_STAGES/<day>/as11_<prefix>.csv
+ * Returns false when the path matches neither layout (e.g. host-test
+ * fixtures under /tmp) — the caller then simply skips the export. */
+static bool sst_to_csv_path(const char *sst, char *csv, size_t cap)
+{
+    char day[9], id[96];
+    const char *p;
+    size_t n = strlen(OX_RECORDINGS);
+    if (strncmp(sst, OX_RECORDINGS, n) == 0 && sst[n] == '/') {
+        p = sst + n + 1;                      /* <day>/<id>/generations/... */
+        if (strlen(p) < 11 || p[8] != '/') return false;
+        const char *ids = p + 9;
+        const char *slash = strchr(ids, '/');
+        if (!slash || slash == ids) return false;
+        size_t il = (size_t)(slash - ids);
+        if (il >= sizeof(id)) return false;
+        memcpy(id, ids, il);
+        id[il] = '\0';
+    } else {
+        static const char suf[] = "_stages.sst";
+        n = strlen(SD_STREAMS);
+        if (strncmp(sst, SD_STREAMS, n) != 0 || sst[n] != '/') return false;
+        p = sst + n + 1;                      /* <day>/<prefix>_stages.sst */
+        if (strlen(p) < 10 || p[8] != '/') return false;
+        const char *base = p + 9;
+        size_t bl = strlen(base);
+        if (bl <= sizeof(suf) - 1 ||
+            strcmp(base + bl - (sizeof(suf) - 1), suf) != 0)
+            return false;
+        size_t pl = bl - (sizeof(suf) - 1);   /* prefix length */
+        if (memchr(base, '/', pl) || pl + 5 >= sizeof(id)) return false;
+        memcpy(id, "as11_", 5);
+        memcpy(id + 5, base, pl);
+        id[5 + pl] = '\0';
+    }
+    memcpy(day, p, 8);
+    day[8] = '\0';
+    for (int i = 0; i < 8; i++)
+        if (day[i] < '0' || day[i] > '9') return false;
+    return snprintf(csv, cap, "%s/%s/%s.csv", SD_STAGES, day, id) < (int)cap;
+}
+
+/* Emit (or refresh) the Zeo CSV for a .sst that is already final.  Called
+ * from write_sst() with the decoded stages still in RAM (hdr + stages), and
+ * from reconcile with both NULL — the backfill path, which reads the .sst
+ * itself but only when the CSV is missing or older than the sidecar. */
+static void export_stage_csv(const char *sst_path,
+                             const somno_sst_header_t *hdr,
+                             const uint8_t *stages)
+{
+    char csv[420];
+    if (!sst_to_csv_path(sst_path, csv, sizeof(csv))) return;
+    int rc;
+    if (hdr && stages) {
+        rc = somno_stage_write_zeo_csv_file(csv, hdr, stages);
+        if (rc != 0)
+            ESP_LOGW(TAG, "%s: stage CSV export failed (%d)", sst_path, rc);
+    } else {
+        struct stat cs, ss;
+        if (stat(csv, &cs) == 0 &&
+            (stat(sst_path, &ss) != 0 || cs.st_mtime >= ss.st_mtime))
+            return;                                   /* already current */
+        rc = somno_stage_export_csv_from_sst(sst_path, csv);
+        if (rc < 0)
+            ESP_LOGW(TAG, "%s: stage CSV backfill failed", sst_path);
+    }
+    if (rc == 0 && s_stage_export_cb) s_stage_export_cb();
+}
+
 static int write_sst(const char *path, const somno_sst_header_t *hdr,
                      const uint8_t *stages, const uint8_t *conf)
 {
@@ -370,6 +451,12 @@ static int write_sst(const char *path, const somno_sst_header_t *hdr,
         unlink(path);
         if (rename(tmp, path) != 0) { unlink(tmp); return -1; }
     }
+    /* A final hypnogram also emits its consumer Zeo CSV into the stages
+     * export tree.  Stubs carry no displayable hypnogram, so INSUFFICIENT
+     * and still-growing PARTIAL sidecars never produce one. */
+    if (!(hdr->flags & (SOMNO_SST_FLAG_INSUFFICIENT | SOMNO_SST_FLAG_PARTIAL)) &&
+        hdr->n_epochs > 0 && stages)
+        export_stage_csv(path, hdr, stages);
     return 0;
 }
 
@@ -1023,7 +1110,12 @@ static void reconcile_ring(const char *cutoff)
                 continue;
             struct stat st;
             if (stat(vitals, &st) != 0) continue;
-            if (sst_fresh(sst, vitals)) continue;
+            if (sst_fresh(sst, vitals)) {
+                /* Fresh .sst from before the CSV exporter existed: derive
+                 * its Zeo CSV now without re-running the model. */
+                export_stage_csv(sst, NULL, NULL);
+                continue;
+            }
             somno_ml_job_t j = { .type = SOMNO_ML_SRC_RING_VITALS };
             strlcpy(j.id, re->d_name, sizeof(j.id));
             if (enqueue_internal(&j, false) != 0) {
@@ -1074,7 +1166,10 @@ static void reconcile_as11(const char *cutoff)
                 snprintf(sa2, sizeof(sa2), "%s/%s", day, fe->d_name) >=
                     (int)sizeof(sa2))
                 continue;
-            if (sst_fresh(sst, sa2)) continue;
+            if (sst_fresh(sst, sa2)) {
+                export_stage_csv(sst, NULL, NULL);   /* CSV backfill */
+                continue;
+            }
             somno_ml_job_t j = { .type = SOMNO_ML_SRC_AS11_SA2 };
             strlcpy(j.dir, day, sizeof(j.dir));
             strlcpy(j.id, prefix, sizeof(j.id));

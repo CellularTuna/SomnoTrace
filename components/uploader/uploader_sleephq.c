@@ -630,6 +630,7 @@ const upload_backend_t sleephq_backend = {
     .label = "SleepHQ Cloud",
     .bundle_only_ok = false,    /* would create an import with no sessions */
     .supports_ox = true,
+    .supports_stage = false,   /* no Zeo-CSV stage import today; units stay pending until it does */
     .is_configured = shq_is_configured,
     .session_begin = shq_session_begin,
     .day_begin = shq_day_begin,

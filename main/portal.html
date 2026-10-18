@@ -1380,7 +1380,7 @@ Maintenance Actions
 <div style="font-weight:600;font-size:.9rem">Reset Upload State</div>
 <div style="color:var(--text-muted);font-size:.8rem;margin-top:2px">Clears upload tracking so all days re-upload from the beginning</div>
 </div>
-<button class="btn btn-primary" onclick="execAction('reset-state','Clear upload state? This will reset the upload tracking for all sessions. All EDF files on the SD card will be re-uploaded to configured backends. Continue?')">Reset State</button>
+<button class="btn btn-primary" onclick="execAction('reset-state','Clear upload state? This will reset the upload tracking for all sessions. All sleep data (CPAP, oximetry, and sleep stages) within the upload window will be re-uploaded to configured backends. Continue?')">Reset State</button>
 </div>
 
 <div class="action-item-row">
@@ -3263,25 +3263,42 @@ function fmtLeft(sec) {
   return Math.round(sec / 60) + ' min';
 }
 
-/* One row per backend: label, done/total days, bar, and a single sub-line
- * that says either what is being uploaded now or why it is waiting. */
+/* One row per backend: label, overall state, a single progress bar driven by
+ * all supported streams combined, and a sub-line of per-stream counters so a
+ * finished CPAP pass can never show 100% while oximetry or stages remain. */
 function renderBackendRow(b) {
-  var done = b.days_done || 0, total = b.days_total || 0;
-  var pct = total > 0 ? Math.round((done / total) * 100) : (b.configured ? 100 : 0);
+  var cDone = b.days_done || 0, cTotal = b.days_total || 0;
+  var oxDone = b.ox_done || 0, oxTotal = b.ox_total || 0;
+  var stDone = b.stage_done || 0, stTotal = b.stage_total || 0;
+  var uDone = (b.units_done != null) ? b.units_done : cDone;
+  var uTotal = (b.units_total != null) ? b.units_total : cTotal;
+  var pct = uTotal > 0 ? Math.round((uDone / uTotal) * 100) : (b.configured ? 100 : 0);
   var colour = b.id === 'sleephq' ? 'var(--accent, #a78bfa)' : 'var(--primary, #38bdf8)';
 
-  var glyph = '', gcol = 'var(--text-muted)';
-  if (!b.configured) { glyph = ''; }
-  else if (b.state === 'uploading') { glyph = '&#8635;'; gcol = 'var(--primary)'; }
-  else if (b.state === 'cooldown') { glyph = '&#9888;'; gcol = 'var(--warning)'; }
-  else if (total > 0 && done >= total) { glyph = '&#10003;'; gcol = 'var(--success)'; }
+  var rightTxt = '', glyph = '', gcol = 'var(--text-muted)';
+  if (!b.configured) {
+    rightTxt = 'Not configured';
+  } else if (b.state === 'uploading') {
+    rightTxt = 'Uploading (' + pct + '%)';
+    glyph = '&#8635;'; gcol = 'var(--primary)';
+  } else if (b.state === 'cooldown') {
+    rightTxt = b.err_permanent ? 'Needs attention' : 'Retry in ' + fmtLeft(b.retry_in_s);
+    glyph = '&#9888;'; gcol = 'var(--warning)';
+  } else if (uTotal > 0 && uDone >= uTotal) {
+    rightTxt = 'Up to date';
+    glyph = '&#10003;'; gcol = 'var(--success)';
+  } else if (uTotal === 0) {
+    rightTxt = 'No data yet';
+  } else {
+    rightTxt = (uTotal - uDone) + ' pending';
+  }
 
   var h = '<div style="margin-bottom:14px">';
   h += '<div style="display:flex;justify-content:space-between;align-items:baseline">';
   h += '<span style="font-weight:600;color:' + colour + '">' + b.label + '</span>';
   if (b.configured) {
-    h += '<span style="font-variant-numeric:tabular-nums">' + done + ' / ' + total + ' days' +
-         ' <span style="color:' + gcol + '">' + glyph + '</span></span>';
+    h += '<span style="font-variant-numeric:tabular-nums;font-size:.82rem;color:' + gcol + '">' +
+         rightTxt + (glyph ? ' ' + glyph : '') + '</span>';
   } else {
     h += '<span style="color:var(--text-muted);font-size:.8rem">Not configured</span>';
   }
@@ -3292,19 +3309,34 @@ function renderBackendRow(b) {
     h += '<div style="height:100%;width:' + pct + '%;background:' + colour +
          ';transition:width .4s"></div></div>';
 
+    var parts = [];
+    var cOk = (cTotal > 0 && cDone >= cTotal) ? ' <span style="color:var(--success)">&#10003;</span>' : '';
+    parts.push('<span>CPAP: <b>' + cDone + '/' + cTotal + 'd</b>' + cOk + '</span>');
+    if (b.supports_ox) {
+      var oOk = (oxTotal > 0 && oxDone >= oxTotal) ? ' <span style="color:var(--success)">&#10003;</span>' : '';
+      parts.push('<span>Oximetry: <b>' + oxDone + '/' + oxTotal + '</b>' + oOk + '</span>');
+    }
+    if (b.supports_stage) {
+      var sOk = (stTotal > 0 && stDone >= stTotal) ? ' <span style="color:var(--success)">&#10003;</span>' : '';
+      parts.push('<span>Stages: <b>' + stDone + '/' + stTotal + '</b>' + sOk + '</span>');
+    }
+
     var sub = '';
     if (b.state === 'uploading' && b.cur) {
-      sub = 'Uploading ' + b.cur.day;
+      var kindLbl = b.cur.kind ? ' (' + b.cur.kind + ')' : '';
+      sub = 'Uploading ' + b.cur.day + kindLbl;
       if (b.cur.units) sub += ' \u00b7 part ' + b.cur.unit + '/' + b.cur.units;
     } else if (b.state === 'cooldown') {
-      sub = (b.err_permanent ? 'Needs attention' : 'Retry in ' + fmtLeft(b.retry_in_s));
-      if (b.err) sub += ' \u2014 ' + b.err;
+      sub = b.err ? b.err : (b.err_permanent ? 'Needs attention' : 'Waiting to retry');
     } else {
       var ago = fmtAgo(b.last_ok_s);
       sub = ago ? 'Last upload: ' + ago : 'No uploads yet';
     }
     var subCol = b.state === 'cooldown' ? 'var(--warning)' : 'var(--text-muted)';
-    h += '<div style="font-size:.78rem;color:' + subCol + ';margin-top:5px">' + sub + '</div>';
+    parts.push('<span style="color:' + subCol + '">' + sub + '</span>');
+
+    h += '<div style="font-size:.78rem;color:var(--text-muted);margin-top:5px;display:flex;flex-wrap:wrap;gap:4px 10px">' +
+         parts.join('<span>\u00b7</span>') + '</div>';
   }
   h += '</div>';
   return h;

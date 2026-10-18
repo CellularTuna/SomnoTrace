@@ -148,6 +148,10 @@ esp_err_t sd_storage_init(void)
     /* Create oximetry directory tree */
     mkdir(SD_OXYMETRY_DIR, 0775);
 
+    /* SomnoStage CSV export tree (created even on stub builds: cheap, and
+     * the uploader scans it unconditionally) */
+    mkdir(SD_STAGES_DIR, 0775);
+
     /* Create ResMed-compatible export directory tree */
     mkdir(SD_SDCARD_DIR, 0775);
     mkdir(SD_SDCARD_DATALOG, 0775);

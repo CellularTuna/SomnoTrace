@@ -337,7 +337,7 @@ static int phase_b(const char *self)
 
 /* ── Phase C: reboot — legacy migration ────────────────────────────── */
 
-static int phase_c(void)
+static int phase_c(const char *self)
 {
     CHECK(upload_ox_init() == ESP_OK, "upload_ox_init failed");
 
@@ -377,6 +377,55 @@ static int phase_c(void)
     CHECK(upload_ox_status(&legacy, SLOT_SHQ) == UG_OK,
           "migrated mark reset by reconcile despite unchanged content");
     free(refs);
+    int r = run_phase(self, "d");
+    return g_failures + r;
+}
+
+static int state_files(void)
+{
+    DIR *d = opendir(OX_DIR);
+    if (!d) return 0;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)))
+        if (strstr(e->d_name, ".json")) n++;
+    closedir(d);
+    return n;
+}
+
+/* ── Phase D: #317 — Reset Upload State clears disk AND RAM ──────────
+ *
+ * The original bug: "Reset" only removed top-level upload_state entries;
+ * the ox/ subdirectory survived on disk and the in-memory list was never
+ * touched, so historical recordings kept their UG_OK marks and were never
+ * re-uploaded.  upload_ox_clear() must wipe both, and the next reconcile
+ * must re-offer every recording inside the window. */
+static int phase_d(void)
+{
+    CHECK(upload_ox_init() == ESP_OK, "upload_ox_init failed");
+
+    upload_ox_ref_t *refs = calloc(UPLOAD_OX_MAX_UNITS, sizeof(*refs));
+    if (!refs) return 1;
+    int kept = upload_ox_reconcile(refs, UPLOAD_OX_MAX_UNITS, WINDOW);
+    CHECK(kept == N_RECS - 1, "pre-clear reconcile count wrong");
+
+    CHECK(upload_ox_clear() == ESP_OK, "upload_ox_clear failed");
+
+    /* Disk: every per-recording unit file is gone. */
+    CHECK(state_files() == 0, "clear left unit files under upload_state/ox");
+    /* RAM: the list is empty — nothing is in-window any more. */
+    CHECK(upload_ox_cached_pending(SLOT_SHQ) == 0,
+          "in-memory state survived upload_ox_clear");
+
+    /* Reconcile re-discovers the recordings as pending — the actual #317
+     * symptom was that they stayed marked uploaded. */
+    kept = upload_ox_reconcile(refs, UPLOAD_OX_MAX_UNITS, WINDOW);
+    CHECK(kept == N_RECS - 1, "post-clear reconcile lost recordings");
+    CHECK(upload_ox_pending(refs, kept, SLOT_SHQ) == N_RECS - 1,
+          "cleared recordings did not come back pending");
+    CHECK(upload_ox_cached_pending(SLOT_SHQ) == N_RECS - 1,
+          "cleared recordings not re-offered in cached pending");
+    free(refs);
     return g_failures;
 }
 
@@ -386,10 +435,11 @@ int main(int argc, char **argv)
     int r;
     if      (!strcmp(phase, "a")) r = phase_a(argv[0]);
     else if (!strcmp(phase, "b")) r = phase_b(argv[0]);
-    else if (!strcmp(phase, "c")) r = phase_c();
+    else if (!strcmp(phase, "c")) r = phase_c(argv[0]);
+    else if (!strcmp(phase, "d")) r = phase_d();
     else r = 1;
 
     if (r) { printf("upload_ox_test: phase %s FAILED (%d)\n", phase, r); return 1; }
-    if (!strcmp(phase, "c")) printf("upload_ox_test: all phases passed\n");
+    if (!strcmp(phase, "d")) printf("upload_ox_test: all phases passed\n");
     return 0;
 }

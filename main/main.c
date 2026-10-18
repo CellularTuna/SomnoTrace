@@ -221,9 +221,11 @@ void app_main(void)
 
     /* 4c-quat. SomnoStage reconcile: backfill .sst stage sidecars for
      * recordings that predate the model (or whose scoring was interrupted).
-     * No-op on stub builds and when the queue is saturated. */
+     * No-op on stub builds and when the queue is saturated.  The export
+     * callback nudges the uploader whenever a new Zeo CSV lands. */
     if (sd_ret == ESP_OK) {
         oximetry_canonical_ensure_dirs();
+        somno_ml_set_stage_export_cb(uploader_request_scan);
         somno_ml_reconcile();
     }
 

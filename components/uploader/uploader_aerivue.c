@@ -550,6 +550,7 @@ const upload_backend_t aerivue_backend = {
     .label = "Aerivue",
     .bundle_only_ok = false,    /* an import with no sessions is clutter */
     .supports_ox = true,
+    .supports_stage = false,   /* no Zeo-CSV stage import today; units stay pending until it does */
     .is_configured = aer_is_configured,
     .session_begin = aer_session_begin,
     .day_begin = aer_day_begin,

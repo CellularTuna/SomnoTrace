@@ -58,4 +58,11 @@ void upload_ox_mark(const upload_ox_ref_t *ref, int backend_slot,
 esp_err_t upload_ox_save(void);
 int upload_ox_pending(const upload_ox_ref_t *refs, int n_refs, int backend_slot);
 int upload_ox_cached_pending(int backend_slot);
+void upload_ox_backend_progress(int backend_slot, int max_days,
+                                int *out_done, int *out_total);
+/* "Reset Upload State" hook (#317): clears the per-recording state files
+ * under upload_state/ox AND the in-memory list, so the next reconcile
+ * re-offers every recording inside the window.  upload_index_clear()
+ * alone cannot reach this subdirectory. */
+esp_err_t upload_ox_clear(void);
 char *upload_ox_status_json(void);

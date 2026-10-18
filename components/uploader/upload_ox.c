@@ -68,6 +68,8 @@ static const char *TAG = "up_ox";
 typedef struct ox_state_s {
     struct ox_state_s *next;
     uint8_t  dirty;         /* needs its file rewritten                   */
+    uint8_t  in_window;     /* inside the newest max_days on the last
+                             * reconcile — pending/progress ignore the rest */
     char     id[UPLOAD_OX_ID_LEN];
     char     day[12];       /* noon-day folder — for existence checks     */
     uint32_t generation;
@@ -611,6 +613,10 @@ int upload_ox_reconcile(upload_ox_ref_t *out, int max_out, int max_days)
         return 0;
     }
     ox_lock();
+    /* Window membership is recomputed every reconcile: only recordings in
+     * the newest max_days distinct day folders count toward the pending and
+     * progress numbers — anything older stays tracked but out of view. */
+    for (ox_state_t *u = s_states; u; u = u->next) u->in_window = false;
     int kept = 0, days_seen = 0; char last_day[12] = {0};
     for (int i = 0; i < n; i++) {
         if (strcmp(last_day, out[i].day) != 0) {
@@ -621,12 +627,15 @@ int upload_ox_reconcile(upload_ox_ref_t *out, int max_out, int max_days)
         ox_state_t *u = state_get(out[kept].recording_id, out[kept].day,
                                   out[kept].generation, out[kept].fingerprint,
                                   true);
-        if (u && u->fingerprint != out[kept].fingerprint) {
-            /* Content changed since last seen — re-upload for all backends. */
-            u->fingerprint = out[kept].fingerprint;
-            memset(u->backend, 0, sizeof(u->backend));
-            memset(u->remote, 0, sizeof(u->remote));
-            u->dirty = true;
+        if (u) {
+            u->in_window = true;
+            if (u->fingerprint != out[kept].fingerprint) {
+                /* Content changed since last seen — re-upload for all backends. */
+                u->fingerprint = out[kept].fingerprint;
+                memset(u->backend, 0, sizeof(u->backend));
+                memset(u->remote, 0, sizeof(u->remote));
+                u->dirty = true;
+            }
         }
         kept++;
     }
@@ -723,15 +732,65 @@ int upload_ox_cached_pending(int backend_slot)
     /* No lazy init here: upload_ox_init() does SD I/O and JSON printing now,
      * too heavy for whatever task a summary query happens to arrive on (the
      * MQTT task has 8 KB).  The scheduler inits at startup; before that the
-     * honest answer is "nothing loaded". */
+     * honest answer is "nothing loaded".  Only in-window units count — the
+     * last reconcile fixed membership; recordings beyond the upload window
+     * are tracked but are not outstanding work. */
     if (!s_loaded || backend_slot < 0 || backend_slot >= OX_MAX_BACKENDS_LOCAL) return 0;
     ox_lock();
     int n = 0;
     for (ox_state_t *u = s_states; u; u = u->next) {
-        if (u->backend[backend_slot].status != UG_OK) n++;
+        if (u->in_window && u->backend[backend_slot].status != UG_OK) n++;
     }
     ox_unlock();
     return n;
+}
+
+void upload_ox_backend_progress(int backend_slot, int max_days,
+                                int *out_done, int *out_total)
+{
+    (void)max_days;   /* in_window was fixed by the last reconcile */
+    int done = 0, total = 0;
+    if (s_loaded && backend_slot >= 0 && backend_slot < OX_MAX_BACKENDS_LOCAL) {
+        ox_lock();
+        for (ox_state_t *u = s_states; u; u = u->next) {
+            if (!u->in_window) continue;
+            total++;
+            if (u->backend[backend_slot].status == UG_OK) done++;
+        }
+        ox_unlock();
+    }
+    if (out_done) *out_done = done;
+    if (out_total) *out_total = total;
+}
+
+esp_err_t upload_ox_clear(void)
+{
+    if (!ox_lock_init()) return ESP_ERR_NO_MEM;
+    ox_lock();
+
+    DIR *d = opendir(OX_STATE_DIR);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.') continue;
+            char path[UPLOAD_OX_PATH_LEN];
+            if (snprintf(path, sizeof(path), "%s/%s", OX_STATE_DIR, e->d_name) <
+                (int)sizeof(path)) {
+                unlink(path);
+            }
+        }
+        closedir(d);
+    }
+
+    while (s_states) {
+        ox_state_t *next = s_states->next;
+        free(s_states);
+        s_states = next;
+    }
+
+    ESP_LOGI(TAG, "oximetry upload state cleared");
+    ox_unlock();
+    return ESP_OK;
 }
 
 char *upload_ox_status_json(void)
