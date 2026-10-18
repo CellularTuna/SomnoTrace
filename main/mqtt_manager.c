@@ -660,7 +660,8 @@ static void mqtt_telemetry_task(void *arg)
         /* Wait for 60s telemetry tick or an immediate event notification */
         bool active = bsp_display_is_therapy_active();
         int64_t wait = telemetry_wait_ms(esp_timer_get_time() / 1000, next_state, next_live, active);
-        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait));
+        int64_t wait_ticks = pdMS_TO_TICKS(wait);
+        uint32_t notified = ulTaskNotifyTake(pdTRUE, wait_ticks > 0 ? wait_ticks : 1);
 
         /* Execute any deferred command-topic messages first. Blocking BLE
          * RPCs are safe here — this is our own worker, not the MQTT task. */

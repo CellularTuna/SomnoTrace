@@ -367,6 +367,29 @@ static void resolve_orphan_days_locked(void)
     }
 }
 
+static int s_window_days;
+
+static void apply_window_locked(int max_days)
+{
+    if (max_days < 1) max_days = 1;
+    for (stage_state_t *u = s_states; u; u = u->next) u->in_window = false;
+    char ceil_day[12] = "";
+    for (int d = 0; d < max_days; d++) {
+        const char *best = NULL;
+        for (stage_state_t *u = s_states; u; u = u->next) {
+            if (!u->day[0]) continue;
+            if (ceil_day[0] && strcmp(u->day, ceil_day) >= 0) continue;
+            if (!best || strcmp(u->day, best) > 0) best = u->day;
+        }
+        if (!best) break;
+        for (stage_state_t *u = s_states; u; u = u->next) {
+            if (strcmp(u->day, best) == 0) u->in_window = true;
+        }
+        strlcpy(ceil_day, best, sizeof(ceil_day));
+    }
+    s_window_days = max_days;
+}
+
 esp_err_t upload_stage_init(void)
 {
     if (!st_lock_init()) return ESP_ERR_NO_MEM;
@@ -399,6 +422,7 @@ esp_err_t upload_stage_init(void)
     }
 
     resolve_orphan_days_locked();
+    apply_window_locked(UPLOAD_DEFAULT_MAX_DAYS);
     save_all_locked();
 
     s_loaded = true;
@@ -585,6 +609,7 @@ int upload_stage_reconcile(upload_stage_ref_t *out, int max_out, int max_days)
     }
 
     save_all_locked();
+    s_window_days = max_days;
     st_unlock();
     return kept;
 }
@@ -654,10 +679,11 @@ int upload_stage_cached_pending(int backend_slot)
 void upload_stage_backend_progress(int backend_slot, int max_days,
                                    int *out_done, int *out_total)
 {
-    (void)max_days;   /* window membership is fixed by the last reconcile */
     int done = 0, total = 0;
     if (s_loaded && backend_slot >= 0 && backend_slot < STAGE_MAX_BACKENDS) {
         st_lock();
+        if (max_days > 0 && max_days != s_window_days)
+            apply_window_locked(max_days);
         for (stage_state_t *u = s_states; u; u = u->next) {
             if (!u->in_window) continue;
             total++;
@@ -692,6 +718,7 @@ esp_err_t upload_stage_clear(void)
         free(s_states);
         s_states = next;
     }
+    s_window_days = 0;
 
     ESP_LOGI(TAG, "stage upload state cleared");
     st_unlock();

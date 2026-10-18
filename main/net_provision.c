@@ -3467,7 +3467,8 @@ static inline esp_err_t reg_public(httpd_handle_t handle, const httpd_uri_t *uri
 #define UPLOAD_THERAPY_GRACE_MS  (60LL * 60 * 1000)
 static bool upload_capture_hold(void)
 {
-    if (sd_storage_recording_active()) return true;
+    if (sd_storage_recording_active() || session_writer_post_active())
+        return true;
     return bsp_display_is_therapy_active() &&
            sd_storage_ms_since_recording_end() < UPLOAD_THERAPY_GRACE_MS;
 }

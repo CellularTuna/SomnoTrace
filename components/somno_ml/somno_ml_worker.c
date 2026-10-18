@@ -344,8 +344,11 @@ int somno_ml_sst_validate(const char *path, char *semver_out, size_t semver_len)
 /* Freshness = valid header + current semver + written strictly after the
  * source's last modification. The mtime rule catches sources that were
  * scored while still being appended (in-progress sessions): their .sst is
- * older than the next commit and gets rescored at finalize. */
-static bool sst_fresh(const char *sst_path, const char *src_path)
+ * older than the next commit and gets rescored at finalize.  If flags_out is
+ * non-NULL, receives the validated header flags so callers can tell a final
+ * hypnogram apart from an INSUFFICIENT stub without opening the file twice. */
+static bool sst_fresh_ex(const char *sst_path, const char *src_path,
+                         int *flags_out)
 {
     char sv[33];
     int flags = somno_ml_sst_validate(sst_path, sv, sizeof(sv));
@@ -355,7 +358,14 @@ static bool sst_fresh(const char *sst_path, const char *src_path)
     struct stat ss, sr;
     if (stat(sst_path, &ss) != 0 || stat(src_path, &sr) != 0)
         return false;
-    return ss.st_mtime > sr.st_mtime;
+    if (ss.st_mtime <= sr.st_mtime) return false;
+    if (flags_out) *flags_out = flags;
+    return true;
+}
+
+static bool sst_fresh(const char *sst_path, const char *src_path)
+{
+    return sst_fresh_ex(sst_path, src_path, NULL);
 }
 
 /* Derive the consumer CSV path belonging to a .sst sidecar:
@@ -407,13 +417,14 @@ static bool sst_to_csv_path(const char *sst, char *csv, size_t cap)
 /* Emit (or refresh) the Zeo CSV for a .sst that is already final.  Called
  * from write_sst() with the decoded stages still in RAM (hdr + stages), and
  * from reconcile with both NULL — the backfill path, which reads the .sst
- * itself but only when the CSV is missing or older than the sidecar. */
-static void export_stage_csv(const char *sst_path,
+ * itself but only when the CSV is missing or older than the sidecar.
+ * Returns true when a CSV file was newly written. */
+static bool export_stage_csv(const char *sst_path,
                              const somno_sst_header_t *hdr,
-                             const uint8_t *stages)
+                             const uint8_t *stages, bool notify)
 {
     char csv[420];
-    if (!sst_to_csv_path(sst_path, csv, sizeof(csv))) return;
+    if (!sst_to_csv_path(sst_path, csv, sizeof(csv))) return false;
     int rc;
     if (hdr && stages) {
         rc = somno_stage_write_zeo_csv_file(csv, hdr, stages);
@@ -423,12 +434,13 @@ static void export_stage_csv(const char *sst_path,
         struct stat cs, ss;
         if (stat(csv, &cs) == 0 &&
             (stat(sst_path, &ss) != 0 || cs.st_mtime >= ss.st_mtime))
-            return;                                   /* already current */
+            return false;                             /* already current */
         rc = somno_stage_export_csv_from_sst(sst_path, csv);
         if (rc < 0)
             ESP_LOGW(TAG, "%s: stage CSV backfill failed", sst_path);
     }
-    if (rc == 0 && s_stage_export_cb) s_stage_export_cb();
+    if (rc == 0 && notify && s_stage_export_cb) s_stage_export_cb();
+    return rc == 0;
 }
 
 static int write_sst(const char *path, const somno_sst_header_t *hdr,
@@ -456,7 +468,7 @@ static int write_sst(const char *path, const somno_sst_header_t *hdr,
      * and still-growing PARTIAL sidecars never produce one. */
     if (!(hdr->flags & (SOMNO_SST_FLAG_INSUFFICIENT | SOMNO_SST_FLAG_PARTIAL)) &&
         hdr->n_epochs > 0 && stages)
-        export_stage_csv(path, hdr, stages);
+        export_stage_csv(path, hdr, stages, true);
     return 0;
 }
 
@@ -1080,6 +1092,7 @@ int somno_ml_score_file(const somno_ml_job_t *job)
 /* ---------------- reconcile scan ---------------- */
 
 static int s_recon_n;   /* reconcile enqueue counter (diag log) */
+static int s_recon_csv; /* CSVs backfilled during reconcile     */
 static volatile bool s_recon_more; /* set when the job queue was full */
 
 /* cutoff is a "YYYYMMDD" day-dir name; entries lexically older are skipped.
@@ -1110,10 +1123,15 @@ static void reconcile_ring(const char *cutoff)
                 continue;
             struct stat st;
             if (stat(vitals, &st) != 0) continue;
-            if (sst_fresh(sst, vitals)) {
+            int sst_flags = 0;
+            if (sst_fresh_ex(sst, vitals, &sst_flags)) {
                 /* Fresh .sst from before the CSV exporter existed: derive
-                 * its Zeo CSV now without re-running the model. */
-                export_stage_csv(sst, NULL, NULL);
+                 * its Zeo CSV now without re-running the model.  Skip
+                 * INSUFFICIENT stubs so reconcile does not stat/open them on
+                 * every periodic pass. */
+                if (!(sst_flags & SOMNO_SST_FLAG_INSUFFICIENT) &&
+                    export_stage_csv(sst, NULL, NULL, false))
+                    s_recon_csv++;
                 continue;
             }
             somno_ml_job_t j = { .type = SOMNO_ML_SRC_RING_VITALS };
@@ -1166,8 +1184,11 @@ static void reconcile_as11(const char *cutoff)
                 snprintf(sa2, sizeof(sa2), "%s/%s", day, fe->d_name) >=
                     (int)sizeof(sa2))
                 continue;
-            if (sst_fresh(sst, sa2)) {
-                export_stage_csv(sst, NULL, NULL);   /* CSV backfill */
+            int sst_flags = 0;
+            if (sst_fresh_ex(sst, sa2, &sst_flags)) {
+                if (!(sst_flags & SOMNO_SST_FLAG_INSUFFICIENT) &&
+                    export_stage_csv(sst, NULL, NULL, false))
+                    s_recon_csv++;
                 continue;
             }
             somno_ml_job_t j = { .type = SOMNO_ML_SRC_AS11_SA2 };
@@ -1201,9 +1222,11 @@ static int reconcile_impl(int max_age_days)
         }
     }
     s_recon_n = 0;
+    s_recon_csv = 0;
     s_recon_more = false;
     reconcile_ring(cutoff[0] ? cutoff : NULL);
     reconcile_as11(cutoff[0] ? cutoff : NULL);
+    if (s_recon_csv > 0 && s_stage_export_cb) s_stage_export_cb();
     ESP_LOGI(TAG, "reconcile%s: %d job(s) queued",
              cutoff[0] ? " (recent)" : "", s_recon_n);
     return 0;
@@ -1310,7 +1333,9 @@ static TickType_t next_wait(void)
         due = s_next_full_ms;
     if (due < 0) return portMAX_DELAY;
     int64_t dms = due - now_ms();
-    return pdMS_TO_TICKS(dms > 0 ? dms : 0);
+    if (dms <= 0) return 0;
+    TickType_t ticks = pdMS_TO_TICKS(dms);
+    return ticks > 0 ? ticks : 1;
 }
 
 static void worker_task(void *arg)

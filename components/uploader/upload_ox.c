@@ -448,6 +448,33 @@ static void resolve_orphan_days_locked(void)
     }
 }
 
+/* Mark only the newest max_days distinct day folders in s_states as
+ * in_window.  Used at init (before the first card scan) and if max_days
+ * changes between scans so progress never over-counts older persisted
+ * history at boot and then jumps backward on the first reconcile. */
+static int s_window_days;
+
+static void apply_window_locked(int max_days)
+{
+    if (max_days < 1) max_days = 1;
+    for (ox_state_t *u = s_states; u; u = u->next) u->in_window = false;
+    char ceil_day[12] = "";
+    for (int d = 0; d < max_days; d++) {
+        const char *best = NULL;
+        for (ox_state_t *u = s_states; u; u = u->next) {
+            if (!u->day[0]) continue;
+            if (ceil_day[0] && strcmp(u->day, ceil_day) >= 0) continue;
+            if (!best || strcmp(u->day, best) > 0) best = u->day;
+        }
+        if (!best) break;
+        for (ox_state_t *u = s_states; u; u = u->next) {
+            if (strcmp(u->day, best) == 0) u->in_window = true;
+        }
+        strlcpy(ceil_day, best, sizeof(ceil_day));
+    }
+    s_window_days = max_days;
+}
+
 esp_err_t upload_ox_init(void)
 {
     if (!ox_lock_init()) return ESP_ERR_NO_MEM;
@@ -481,6 +508,7 @@ esp_err_t upload_ox_init(void)
 
     migrate_legacy();
     resolve_orphan_days_locked();
+    apply_window_locked(UPLOAD_DEFAULT_MAX_DAYS);
     save_all_locked();
 
     s_loaded = true;
@@ -674,6 +702,7 @@ int upload_ox_reconcile(upload_ox_ref_t *out, int max_out, int max_days)
     }
 
     save_all_locked();
+    s_window_days = max_days;
     ox_unlock();
     return kept;
 }
@@ -748,10 +777,11 @@ int upload_ox_cached_pending(int backend_slot)
 void upload_ox_backend_progress(int backend_slot, int max_days,
                                 int *out_done, int *out_total)
 {
-    (void)max_days;   /* in_window was fixed by the last reconcile */
     int done = 0, total = 0;
     if (s_loaded && backend_slot >= 0 && backend_slot < OX_MAX_BACKENDS_LOCAL) {
         ox_lock();
+        if (max_days > 0 && max_days != s_window_days)
+            apply_window_locked(max_days);
         for (ox_state_t *u = s_states; u; u = u->next) {
             if (!u->in_window) continue;
             total++;
@@ -787,6 +817,7 @@ esp_err_t upload_ox_clear(void)
         free(s_states);
         s_states = next;
     }
+    s_window_days = 0;
 
     ESP_LOGI(TAG, "oximetry upload state cleared");
     ox_unlock();

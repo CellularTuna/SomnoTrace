@@ -96,7 +96,7 @@ static int s_n_rt = 0;
 
 /* ── Module state ─────────────────────────────────────────────────── */
 
-typedef enum { EV_EXPORT = 0, EV_INVALIDATE, EV_SCAN, EV_RESET } ev_type_t;
+typedef enum { EV_EXPORT = 0, EV_INVALIDATE, EV_SCAN, EV_RESET, EV_PASS } ev_type_t;
 
 typedef struct {
     uint8_t  type;
@@ -129,6 +129,7 @@ static upload_sched_busy_fn_t s_therapy_fn;
  * wedge the uploader forever would be a worse defect than the race it closes. */
 static bool    s_probe_active;
 static int64_t s_probe_since_us;
+static bool    s_pass_deferred;
 
 static int64_t s_next_scan_us;
 static bool    s_scanning;
@@ -281,6 +282,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
 
     if (n_days == 0 && !bundle_changed && ox_pending == 0 && st_pending == 0) {
         free(ox_refs); free(st_refs);
+        cooldown_reset(r);
         set_be_state(r, SB_IDLE);
         r->cur_day[0] = '\0';
         r->cur_kind[0] = '\0';
@@ -379,6 +381,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
     if (!refs) {
         if (be->session_end) be->session_end();
         free(ox_refs); free(st_refs);
+        set_be_state(r, SB_IDLE);
         return false;
     }
 
@@ -697,6 +700,16 @@ static bool probe_in_flight(void)
     return held;
 }
 
+/* Why an upload pass cannot start right now, or NULL.  One predicate shared
+ * by run_pass (which enforces the deferral) and sched_task (which must not
+ * busy-wait on a deadline the pass cannot consume). */
+static const char *pass_block_reason(void)
+{
+    if (probe_in_flight()) return "a connection test is in flight";
+    if (s_therapy_fn && s_therapy_fn()) return "therapy in progress";
+    return NULL;
+}
+
 static void run_pass(void)
 {
     /* ONE choke point, deliberately. Every route into a run -- the periodic
@@ -704,19 +717,27 @@ static void run_pass(void)
      * so guarding here defers all of them.  Guarding only the periodic scan
      * (as the s_busy_fn hook above does) would leave the event-driven paths
      * free to open a second transport beside the probe, which is the exact
-     * contention this is meant to prevent. */
-    if (probe_in_flight()) {
-        ESP_LOGD(TAG, "upload pass deferred: a connection test is in flight");
+     * contention this is meant to prevent.  The index keeps accumulating
+     * pending groups; nothing is lost.  Deliberately no status write — the
+     * accurate badge stays "N parts pending". */
+    static const char *s_deferred_why;
+    const char *blocked = pass_block_reason();
+    if (blocked) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_pass_deferred = true;
+        xSemaphoreGive(s_lock);
+        if (s_deferred_why != blocked) {
+            s_deferred_why = blocked;
+            ESP_LOGI(TAG, "upload pass deferred: %s", blocked);
+        }
         return;
     }
-
-    if (s_therapy_fn && s_therapy_fn()) {
-        /* One choke point again: deferring here covers the periodic tick,
-         * EV_EXPORT, EV_SCAN and manual requests alike.  The index keeps
-         * accumulating pending groups; nothing is lost.  Deliberately no
-         * status write — the accurate badge stays "N parts pending". */
-        ESP_LOGD(TAG, "upload pass deferred: therapy in progress");
-        return;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_pass_deferred = false;
+    xSemaphoreGive(s_lock);
+    if (s_deferred_why) {
+        s_deferred_why = NULL;
+        ESP_LOGD(TAG, "upload pass resumed");
     }
 
     const upload_backend_t *bes[UPLOAD_MAX_BACKENDS];
@@ -733,6 +754,7 @@ static void run_pass(void)
         if (!r || r->slot < 0) continue;
 
         if (!bes[i]->is_configured || !bes[i]->is_configured()) {
+            cooldown_reset(r);
             set_be_state(r, SB_DISABLED);
             continue;
         }
@@ -850,17 +872,39 @@ static void sched_task(void *arg)
     set_status("Waiting for first scan");
 
     while (1) {
-        /* Sleep until the next scan or the earliest cooldown expiry. */
+        /* Sleep until the next scan or (when passes are not gated) the
+         * earliest cooldown expiry.  While a pass is gated (probe or therapy
+         * hold), cooldown deadlines cannot be consumed by run_pass() — folding
+         * an already-expired retry_at_us into wake_us would pin wait=0 and
+         * spin this task at 100% CPU, starving IDLE0 until the task watchdog
+         * fires.  Normal hold releases wake the task via EV_EXPORT/EV_SCAN/
+         * EV_PASS; a leaked probe claim is bounded by UPLOAD_PROBE_MAX_MS. */
+        int64_t now = now_us();
         int64_t wake_us = s_next_scan_us;
-        for (int i = 0; i < s_n_rt; i++) {
-            if (s_rt[i].state == SB_COOLDOWN && s_rt[i].retry_at_us > 0 &&
-                s_rt[i].retry_at_us < wake_us) {
-                wake_us = s_rt[i].retry_at_us;
+        if (!pass_block_reason()) {
+            for (int i = 0; i < s_n_rt; i++) {
+                if (s_rt[i].state == SB_COOLDOWN && s_rt[i].retry_at_us > 0 &&
+                    s_rt[i].retry_at_us < wake_us) {
+                    wake_us = s_rt[i].retry_at_us;
+                }
             }
+        } else {
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            if (s_probe_active) {
+                int64_t probe_exp = s_probe_since_us +
+                                    (int64_t)UPLOAD_PROBE_MAX_MS * 1000;
+                if (probe_exp < wake_us) wake_us = probe_exp;
+            }
+            xSemaphoreGive(s_lock);
         }
-        int64_t delay_us = wake_us - now_us();
-        if (delay_us < 0) delay_us = 0;
-        TickType_t wait = pdMS_TO_TICKS(delay_us / 1000);
+        int64_t delay_us = wake_us - now;
+        /* Round positive delays UP + 1 tick: at CONFIG_FREERTOS_HZ=100 (10 ms
+         * per tick), truncating delay_us/1000 plus a partial first tick wakes
+         * xQueueReceive a few ms before wake_us, causing now_us() >= wake_us
+         * checks below to miss and spin until the tick boundary passes. */
+        TickType_t wait = (delay_us > 0)
+                        ? (pdMS_TO_TICKS((delay_us + 999) / 1000) + 1)
+                        : 0;
 
         sched_ev_t ev;
         bool got = (xQueueReceive(s_queue, &ev, wait) == pdTRUE);
@@ -897,6 +941,10 @@ static void sched_task(void *arg)
                     s_rt[i].last_ok_s = 0;
                 }
                 do_scan();
+                run_pass();
+                break;
+
+            case EV_PASS:
                 run_pass();
                 break;
 
@@ -1002,9 +1050,23 @@ bool upload_sched_probe_begin(void)
 
 void upload_sched_probe_end(void)
 {
+    bool wake = false;
+    int64_t now = now_us();
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_probe_active = false;
+    if (s_pass_deferred) {
+        wake = true;
+    } else {
+        for (int i = 0; i < s_n_rt; i++) {
+            if (s_rt[i].state == SB_COOLDOWN && s_rt[i].retry_at_us > 0 &&
+                s_rt[i].retry_at_us <= now) {
+                wake = true;
+                break;
+            }
+        }
+    }
     xSemaphoreGive(s_lock);
+    if (wake) post(EV_PASS, 0);
 }
 
 /* ── Progress reporting ───────────────────────────────────────────── */

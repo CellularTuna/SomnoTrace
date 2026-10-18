@@ -300,12 +300,11 @@ struct session_writer {
 static session_writer_t *s_active = NULL;
 static SemaphoreHandle_t s_active_mutex = NULL;
 
-/* Set while the post worker runs the BLE post-therapy collection for a
- * finalized session (see session_writer_post_active).  Advisory
- * telemetry: read without a lock — a bool cannot tear and one cycle of
- * staleness is harmless for both consumers (disconnect-context line,
- * incident-diagnostics gating). */
+/* Set while the post worker is processing a finalized session (from
+ * sw_request_finalize through BLE post-therapy collection and EDF export;
+ * see session_writer_post_active). */
 static volatile bool s_post_active;
+static volatile int  s_post_in_flight;
 static QueueHandle_t     s_storage_q = NULL;
 static QueueHandle_t     s_post_q = NULL;
 static TaskHandle_t      s_storage_task = NULL;
@@ -1454,7 +1453,10 @@ static void sw_post_task(void *arg)
             continue;
         }
         session_writer_t *s = job.s;
-        if (!s) continue;
+        if (!s) {
+            __atomic_sub_fetch(&s_post_in_flight, 1, __ATOMIC_SEQ_CST);
+            continue;
+        }
 
         /* 1. Establish drift with honest provenance.
          *
@@ -1547,8 +1549,10 @@ static void sw_post_task(void *arg)
         s = NULL;
 
         if (storage_failed) {
+            __atomic_sub_fetch(&s_post_in_flight, 1, __ATOMIC_SEQ_CST);
             ESP_LOGE(TAG, "post: storage failed for %s — skipping export",
                      session_id);
+            if (!bsp_display_is_therapy_active()) uploader_request_scan();
             continue;
         }
 
@@ -1576,15 +1580,14 @@ static void sw_post_task(void *arg)
                      session_id);
         }
 
-        /* 4b. Queue post-session sleep staging for the finalized sa2 stream
-         * (no-op on stub builds; the worker re-validates the .sst marker). */
-        somno_ml_enqueue_as11(session_dir, session_id);
-
         /* 5. EDF generation + upload trigger.  Runs here rather than in a
          * per-stop task: one persistent worker means no allocation can fail
-         * at the exact moment a session needs exporting. */
+         * at the exact moment a session needs exporting.  Release the
+         * post-stop hold just before notifying the uploader so EV_EXPORT sees
+         * the hold cleared and the complete day's EDFs already on disk. */
         esp_err_t ret = edf_gen_generate(session_dir, session_id,
                                         start_epoch_ms, end_epoch_ms, drift_ms);
+        __atomic_sub_fetch(&s_post_in_flight, 1, __ATOMIC_SEQ_CST);
         char day_folder[32];
         as11_time_noon_day(start_epoch_ms - drift_ms, day_folder, sizeof(day_folder));
         if (ret == ESP_OK) {
@@ -1605,7 +1608,13 @@ static void sw_post_task(void *arg)
         } else {
             ESP_LOGW(TAG, "post: EDF generation failed (%s), not triggering upload",
                      esp_err_to_name(ret));
+            if (!bsp_display_is_therapy_active()) uploader_request_scan();
         }
+
+        /* 5b. Queue post-session sleep staging for the finalized sa2 stream
+         * after EDF export completes so the two passes do not contend for the
+         * card or fire a stage-only upload scan ahead of the session's EDFs. */
+        somno_ml_enqueue_as11(session_dir, session_id);
 
         UBaseType_t free_bytes = uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t);
         if (free_bytes < 2048) {
@@ -1764,6 +1773,10 @@ static void sw_request_finalize(session_writer_t *s, const char *state,
     s->active = false;
     if (s_active == s) s_active = NULL;
     xSemaphoreGive(s_active_mutex);
+    /* Claim the post-stop hold BEFORE releasing sd_storage_recording_active()
+     * so upload_capture_hold() sees no gap between raw capture ending and the
+     * post-therapy BLE collection / EDF export pipeline running. */
+    __atomic_add_fetch(&s_post_in_flight, 1, __ATOMIC_SEQ_CST);
     if (was_active) sd_storage_recording_end();
 
     crash_diag_note_activity(state ? state : "finalize");
@@ -1780,6 +1793,7 @@ static void sw_request_finalize(session_writer_t *s, const char *state,
         .allow_ble = allow_ble,
     };
     if (xQueueSend(s_post_q, &job, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        __atomic_sub_fetch(&s_post_in_flight, 1, __ATOMIC_SEQ_CST);
         /* Post queue full: finalise the files anyway so the raw data is never
          * left unfinished, and let the day rebuild handle the export. */
         ESP_LOGE(TAG, "post queue full — finalising files without export");
@@ -1822,7 +1836,8 @@ session_writer_t *session_writer_get_active(void)
 
 bool session_writer_post_active(void)
 {
-    return s_post_active;
+    return s_post_active ||
+           __atomic_load_n(&s_post_in_flight, __ATOMIC_SEQ_CST) > 0;
 }
 
 bool session_writer_active_start_epoch_ms(int64_t *out)
