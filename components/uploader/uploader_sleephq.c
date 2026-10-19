@@ -627,7 +627,7 @@ static upload_result_t shq_day_end(const char *day, bool any_uploaded)
 
 const upload_backend_t sleephq_backend = {
     .id = "sleephq",
-    .label = "SleepHQ Cloud",
+    .label = "SleepHQ",
     .bundle_only_ok = false,    /* would create an import with no sessions */
     .supports_ox = true,
     .supports_stage = false,   /* no Zeo-CSV stage import today; units stay pending until it does */
