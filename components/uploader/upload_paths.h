@@ -43,3 +43,7 @@
 #define SD_SDCARD_DIR        SD_MOUNT_POINT "/SDCARD"
 #define SD_SDCARD_DATALOG    SD_SDCARD_DIR "/DATALOG"
 #define SD_SDCARD_SETTINGS   SD_SDCARD_DIR "/SETTINGS"
+
+/* SomnoStage CSV export tree the uploader scans — must mirror SD_STAGES_DIR
+ * in main/sd_storage.h. */
+#define SD_STAGES_DIR        SD_MOUNT_POINT "/.somnotrace/stages"

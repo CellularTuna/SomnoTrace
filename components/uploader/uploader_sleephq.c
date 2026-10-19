@@ -545,7 +545,7 @@ static upload_result_t shq_put_oximetry(const upload_ox_ref_t *ref)
         if (strcmp(rel, "source/source.bin") != 0 &&
             strcmp(rel, "source/source.vld") != 0) continue;
         char subpath[96];
-        snprintf(subpath, sizeof(subpath), "/OXYMETRY/%s", ref->day);
+        snprintf(subpath, sizeof(subpath), "/OXIMETRY/%s", ref->day);
         char filename[128];
         snprintf(filename, sizeof(filename), "%s",
                  ref->source_name[0] ? ref->source_name : "oximetry");
@@ -627,9 +627,10 @@ static upload_result_t shq_day_end(const char *day, bool any_uploaded)
 
 const upload_backend_t sleephq_backend = {
     .id = "sleephq",
-    .label = "SleepHQ Cloud",
+    .label = "SleepHQ",
     .bundle_only_ok = false,    /* would create an import with no sessions */
     .supports_ox = true,
+    .supports_stage = false,   /* no Zeo-CSV stage import today; units stay pending until it does */
     .is_configured = shq_is_configured,
     .session_begin = shq_session_begin,
     .day_begin = shq_day_begin,

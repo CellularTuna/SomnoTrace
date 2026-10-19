@@ -1119,7 +1119,7 @@ static int oxyii_get_file_list(char names[][17], int max_count)
 static esp_err_t oxyii_convert_stored(const char *name)
 {
     char source_path[640];
-    snprintf(source_path, sizeof(source_path), SD_OXYMETRY_DIR "/files/%s/%s.bin",
+    snprintf(source_path, sizeof(source_path), SD_OXIMETRY_DIR "/files/%s/%s.bin",
              s_serial, name);
     esp_err_t conversion = oximetry_canonical_convert_format_a(
         s_serial, name, source_path, oximetry_filename_epoch_ms(name));

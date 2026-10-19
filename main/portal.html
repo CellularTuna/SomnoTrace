@@ -111,6 +111,21 @@ main{flex:1;padding:16px;max-width:1440px;width:100%;margin:0 auto;display:flex;
 .card-danger{border-left-color:var(--danger)}
 .card-title{font-size:1rem;font-weight:600;margin-bottom:14px;color:var(--text);display:flex;align-items:center;gap:8px}
 .card-title svg{width:18px;height:18px;fill:var(--primary)}
+/* Backend brand marks, hot-linked from each service so no third-party artwork is
+ * redistributed in this GPL repo.  The remote logo is layered over the card's
+ * existing generic inline icon, which stays as the placeholder and reserves the
+ * slot, so a failed, blocked or offline fetch degrades to the pre-branding look
+ * with no layout shift.  The <img> only fades in once it actually loads. */
+.card-logo{position:relative;display:inline-block;width:18px;height:18px;flex:none;overflow:hidden}
+.card-logo>svg{position:absolute;left:0;top:0;width:18px;height:18px}
+.card-logo>img{position:absolute;left:0;top:0;width:18px;height:18px;max-width:none;opacity:0;transition:opacity .25s}
+.card-logo.on>img{opacity:1}
+.card-logo.on>svg{opacity:0}
+/* SleepHQ publishes a 990x210 lockup (swirl + "SleepHQ" wordmark), not a square
+ * icon.  The swirl occupies units 0..304 and the wordmark starts at 329, so
+ * drawing the lockup at 58.7x12.4 (swirl exactly 18px wide) and anchoring it
+ * left lets the slot crop the wordmark off and show the whole swirl. */
+.card-logo-shq>img{top:2.8px;width:58.7px;height:12.4px}
 
 /* ── Form Elements ─────────────────────────────────────────────── */
 .form-group{margin-bottom:14px;display:flex;flex-direction:column;gap:5px}
@@ -664,11 +679,11 @@ Network Folder (SMB Share)
 </div>
 </div>
 
-<!-- SleepHQ Cloud -->
+<!-- SleepHQ -->
 <div class="card card-shq" id="shq-card">
 <div class="card-title">
-<svg viewBox="0 0 24 24"><path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.99 5.99 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM19 18H6c-2.21 0-4-1.79-4-4s1.79-4 4-4h.71A5.5 5.5 0 0 1 12 6c2.76 0 5 2.24 5 5v1h2c1.65 0 3 1.35 3 3s-1.35 3-3 3z"/></svg>
-SleepHQ Cloud Upload
+<span class="card-logo card-logo-shq"><svg viewBox="0 0 24 24"><path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.99 5.99 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM19 18H6c-2.21 0-4-1.79-4-4s1.79-4 4-4h.71A5.5 5.5 0 0 1 12 6c2.76 0 5 2.24 5 5v1h2c1.65 0 3 1.35 3 3s-1.35 3-3 3z"/></svg><img src="https://www.sleephq.com/logo/logo_horizontal.svg" alt="" loading="eager" referrerpolicy="no-referrer" onload="this.parentNode.classList.add('on')" onerror="this.remove()"></span>
+SleepHQ Upload
 </div>
 <div class="toggle-row">
 <label for="shq-enabled">Enable SleepHQ Upload</label>
@@ -701,7 +716,7 @@ SleepHQ Cloud Upload
 
 <div class="card card-aer" id="aer-card">
 <div class="card-title">
-<svg viewBox="0 0 24 24"><path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.99 5.99 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM19 18H6c-2.21 0-4-1.79-4-4s1.79-4 4-4h.71A5.5 5.5 0 0 1 12 6c2.76 0 5 2.24 5 5v1h2c1.65 0 3 1.35 3 3s-1.35 3-3 3z"/></svg>
+<span class="card-logo"><svg viewBox="0 0 24 24"><path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.99 5.99 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM19 18H6c-2.21 0-4-1.79-4-4s1.79-4 4-4h.71A5.5 5.5 0 0 1 12 6c2.76 0 5 2.24 5 5v1h2c1.65 0 3 1.35 3 3s-1.35 3-3 3z"/></svg><img src="https://aerivue.app/favicon.svg" alt="" loading="eager" referrerpolicy="no-referrer" onload="this.parentNode.classList.add('on')" onerror="this.remove()"></span>
 Aerivue Upload
 </div>
 <div class="toggle-row">
@@ -730,7 +745,7 @@ Aerivue Upload
 
 <div class="card card-br" id="br-card">
 <div class="card-title">
-<svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+<span class="card-logo"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg><img src="https://breathingroom.io/favicon.svg" alt="" loading="eager" referrerpolicy="no-referrer" onload="this.parentNode.classList.add('on')" onerror="this.remove()"></span>
 BreathingRoom Upload
 </div>
 <div class="toggle-row">
@@ -1380,7 +1395,7 @@ Maintenance Actions
 <div style="font-weight:600;font-size:.9rem">Reset Upload State</div>
 <div style="color:var(--text-muted);font-size:.8rem;margin-top:2px">Clears upload tracking so all days re-upload from the beginning</div>
 </div>
-<button class="btn btn-primary" onclick="execAction('reset-state','Clear upload state? This will reset the upload tracking for all sessions. All EDF files on the SD card will be re-uploaded to configured backends. Continue?')">Reset State</button>
+<button class="btn btn-primary" onclick="execAction('reset-state','Clear upload state? This will reset the upload tracking for all sessions. All sleep data (CPAP, oximetry, and sleep stages) within the upload window will be re-uploaded to configured backends. Continue?')">Reset State</button>
 </div>
 
 <div class="action-item-row">
@@ -3263,25 +3278,42 @@ function fmtLeft(sec) {
   return Math.round(sec / 60) + ' min';
 }
 
-/* One row per backend: label, done/total days, bar, and a single sub-line
- * that says either what is being uploaded now or why it is waiting. */
+/* One row per backend: label, overall state, a single progress bar driven by
+ * all supported streams combined, and a sub-line of per-stream counters so a
+ * finished CPAP pass can never show 100% while oximetry or stages remain. */
 function renderBackendRow(b) {
-  var done = b.days_done || 0, total = b.days_total || 0;
-  var pct = total > 0 ? Math.round((done / total) * 100) : (b.configured ? 100 : 0);
+  var cDone = b.days_done || 0, cTotal = b.days_total || 0;
+  var oxDone = b.ox_done || 0, oxTotal = b.ox_total || 0;
+  var stDone = b.stage_done || 0, stTotal = b.stage_total || 0;
+  var uDone = (b.units_done != null) ? b.units_done : cDone;
+  var uTotal = (b.units_total != null) ? b.units_total : cTotal;
+  var pct = uTotal > 0 ? Math.round((uDone / uTotal) * 100) : (b.configured ? 100 : 0);
   var colour = b.id === 'sleephq' ? 'var(--accent, #a78bfa)' : 'var(--primary, #38bdf8)';
 
-  var glyph = '', gcol = 'var(--text-muted)';
-  if (!b.configured) { glyph = ''; }
-  else if (b.state === 'uploading') { glyph = '&#8635;'; gcol = 'var(--primary)'; }
-  else if (b.state === 'cooldown') { glyph = '&#9888;'; gcol = 'var(--warning)'; }
-  else if (total > 0 && done >= total) { glyph = '&#10003;'; gcol = 'var(--success)'; }
+  var rightTxt = '', glyph = '', gcol = 'var(--text-muted)';
+  if (!b.configured) {
+    rightTxt = 'Not configured';
+  } else if (b.state === 'uploading') {
+    rightTxt = 'Uploading (' + pct + '%)';
+    glyph = '&#8635;'; gcol = 'var(--primary)';
+  } else if (b.state === 'cooldown') {
+    rightTxt = b.err_permanent ? 'Needs attention' : 'Retry in ' + fmtLeft(b.retry_in_s);
+    glyph = '&#9888;'; gcol = 'var(--warning)';
+  } else if (uTotal > 0 && uDone >= uTotal) {
+    rightTxt = 'Up to date';
+    glyph = '&#10003;'; gcol = 'var(--success)';
+  } else if (uTotal === 0) {
+    rightTxt = 'No data yet';
+  } else {
+    rightTxt = (uTotal - uDone) + ' pending';
+  }
 
   var h = '<div style="margin-bottom:14px">';
   h += '<div style="display:flex;justify-content:space-between;align-items:baseline">';
   h += '<span style="font-weight:600;color:' + colour + '">' + b.label + '</span>';
   if (b.configured) {
-    h += '<span style="font-variant-numeric:tabular-nums">' + done + ' / ' + total + ' days' +
-         ' <span style="color:' + gcol + '">' + glyph + '</span></span>';
+    h += '<span style="font-variant-numeric:tabular-nums;font-size:.82rem;color:' + gcol + '">' +
+         rightTxt + (glyph ? ' ' + glyph : '') + '</span>';
   } else {
     h += '<span style="color:var(--text-muted);font-size:.8rem">Not configured</span>';
   }
@@ -3292,19 +3324,34 @@ function renderBackendRow(b) {
     h += '<div style="height:100%;width:' + pct + '%;background:' + colour +
          ';transition:width .4s"></div></div>';
 
+    var parts = [];
+    var cOk = (cTotal > 0 && cDone >= cTotal) ? ' <span style="color:var(--success)">&#10003;</span>' : '';
+    parts.push('<span>CPAP: <b>' + cDone + '/' + cTotal + 'd</b>' + cOk + '</span>');
+    if (b.supports_ox) {
+      var oOk = (oxTotal > 0 && oxDone >= oxTotal) ? ' <span style="color:var(--success)">&#10003;</span>' : '';
+      parts.push('<span>Oximetry: <b>' + oxDone + '/' + oxTotal + 'd</b>' + oOk + '</span>');
+    }
+    if (b.supports_stage) {
+      var sOk = (stTotal > 0 && stDone >= stTotal) ? ' <span style="color:var(--success)">&#10003;</span>' : '';
+      parts.push('<span>Stages: <b>' + stDone + '/' + stTotal + 'd</b>' + sOk + '</span>');
+    }
+
     var sub = '';
     if (b.state === 'uploading' && b.cur) {
-      sub = 'Uploading ' + b.cur.day;
+      var kindLbl = b.cur.kind ? ' (' + b.cur.kind + ')' : '';
+      sub = 'Uploading ' + b.cur.day + kindLbl;
       if (b.cur.units) sub += ' \u00b7 part ' + b.cur.unit + '/' + b.cur.units;
     } else if (b.state === 'cooldown') {
-      sub = (b.err_permanent ? 'Needs attention' : 'Retry in ' + fmtLeft(b.retry_in_s));
-      if (b.err) sub += ' \u2014 ' + b.err;
+      sub = b.err ? b.err : (b.err_permanent ? 'Needs attention' : 'Waiting to retry');
     } else {
       var ago = fmtAgo(b.last_ok_s);
       sub = ago ? 'Last upload: ' + ago : 'No uploads yet';
     }
     var subCol = b.state === 'cooldown' ? 'var(--warning)' : 'var(--text-muted)';
-    h += '<div style="font-size:.78rem;color:' + subCol + ';margin-top:5px">' + sub + '</div>';
+    parts.push('<span style="color:' + subCol + '">' + sub + '</span>');
+
+    h += '<div style="font-size:.78rem;color:var(--text-muted);margin-top:5px;display:flex;flex-wrap:wrap;gap:4px 10px">' +
+         parts.join('<span>\u00b7</span>') + '</div>';
   }
   h += '</div>';
   return h;

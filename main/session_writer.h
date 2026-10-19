@@ -64,10 +64,11 @@ bool session_writer_is_active(const session_writer_t *s);
 /* Get the current active session handle (or NULL). */
 session_writer_t *session_writer_get_active(void);
 
-/* True while the post worker is inside the BLE post-therapy collection
- * for a finalized session (spool pulls + Get RPCs).  Used by the
- * disconnect-context telemetry and to defer incident diagnostics so two
- * BLE collection flows never overlap. */
+/* True while the post worker is processing a finalized session (from
+ * sw_request_finalize through BLE post-therapy collection and EDF export).
+ * Used by the disconnect-context telemetry, to defer incident diagnostics so
+ * two BLE collection flows never overlap, and by upload_capture_hold() so an
+ * upload pass never starts mid-collection or before the session's EDFs exist. */
 bool session_writer_post_active(void);
 
 /* Start epoch (ms) of the active session, if any.  Returns false when no

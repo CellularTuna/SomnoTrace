@@ -41,7 +41,7 @@
 
 static const char *TAG = "ox_store";
 
-#define OXY_BASE       SD_OXYMETRY_DIR
+#define OXY_BASE       SD_OXIMETRY_DIR
 #define OXY_INBOX      OXY_BASE "/inbox"
 #define OXY_FILES      OXY_BASE "/files"
 #define OXY_PAIRED_JSON OXY_BASE "/paired.json"

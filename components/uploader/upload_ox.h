@@ -28,14 +28,14 @@
 #include "upload_index.h"
 
 /* Bounds the ref array returned by upload_ox_scan()/reconcile() — one ref is
- * ~5.5 KB (paths), allocs are transient PSRAM.  This is NOT a state cap:
+ * ~1.3 KB (paths), allocs are transient PSRAM.  This is NOT a state cap:
  * upload state is a grow-on-demand list persisted per recording, so exceeding
  * this only hides the oldest recordings from one pass (a warning is logged). */
-#define UPLOAD_OX_MAX_UNITS 128
-#define UPLOAD_OX_MAX_FILES 8
+#define UPLOAD_OX_MAX_UNITS 768
+#define UPLOAD_OX_MAX_FILES 4
 #define UPLOAD_OX_ID_LEN 64
-#define UPLOAD_OX_PATH_LEN 512
-#define UPLOAD_OX_REL_LEN 96
+#define UPLOAD_OX_PATH_LEN 192
+#define UPLOAD_OX_REL_LEN 48
 
 typedef struct {
     char day[12];
@@ -58,4 +58,11 @@ void upload_ox_mark(const upload_ox_ref_t *ref, int backend_slot,
 esp_err_t upload_ox_save(void);
 int upload_ox_pending(const upload_ox_ref_t *refs, int n_refs, int backend_slot);
 int upload_ox_cached_pending(int backend_slot);
+void upload_ox_backend_progress(int backend_slot, int max_days,
+                                int *out_done, int *out_total);
+/* "Reset Upload State" hook (#317): clears the per-recording state files
+ * under upload_state/ox AND the in-memory list, so the next reconcile
+ * re-offers every recording inside the window.  upload_index_clear()
+ * alone cannot reach this subdirectory. */
+esp_err_t upload_ox_clear(void);
 char *upload_ox_status_json(void);

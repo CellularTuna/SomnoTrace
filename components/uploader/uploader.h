@@ -28,6 +28,7 @@
 #include <stddef.h>
 #include "upload_scan.h"
 #include "upload_ox.h"
+#include "upload_stage.h"
 
 /* ── Upload backend interface ──────────────────────────────────────────
  *
@@ -97,6 +98,15 @@ typedef struct {
      * oximetry on SMB/SleepHQ/Aerivue. */
     bool supports_ox;
 
+    /* Does this backend accept SomnoStage sleep stage units?  The unit
+     * carries both the Zeo-compatible CSV (what SMB copies for OSCAR's
+     * "Import ZEO Data") and the source .sst path, so a future backend can
+     * choose either representation.  False means stage units stay pending —
+     * never attempted, never failed — and are omitted from this backend's
+     * progress counts; flipping it true backfills existing CSVs on the next
+     * pass. */
+    bool supports_stage;
+
     /* Check if this backend has valid configuration (config keys in NVS). */
     bool (*is_configured)(void);
 
@@ -115,6 +125,13 @@ typedef struct {
     upload_result_t (*ox_day_begin)(const char *day);
     upload_result_t (*put_oximetry)(const upload_ox_ref_t *ref);
     upload_result_t (*ox_day_end)(const char *day, bool any_uploaded);
+
+    /* Sleep stage transport scope, same pattern as oximetry.  If the
+     * day_begin/day_end hooks are omitted the normal day callbacks are
+     * reused; put_stage must exist for any unit to be attempted. */
+    upload_result_t (*stage_day_begin)(const char *day);
+    upload_result_t (*put_stage)(const upload_stage_ref_t *ref);
+    upload_result_t (*stage_day_end)(const char *day, bool any_uploaded);
 
     /* Offer the root bundle for this day (see note above). */
     upload_result_t (*put_bundle)(const char *day,

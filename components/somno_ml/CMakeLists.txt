@@ -13,7 +13,7 @@ set(_sst_kb    "${CMAKE_CURRENT_LIST_DIR}/key_b.inc")
 if(EXISTS "${_sst_model}" AND EXISTS "${_sst_ka}" AND EXISTS "${_sst_kb}")
     idf_component_register(
         SRCS "somno_ml.c" "somno_ml_keys.c" "somno_ml_worker.c"
-             "somno_ml_model.c" "somno_ml_features.c"
+             "somno_ml_model.c" "somno_ml_features.c" "somno_stage_csv.c"
         INCLUDE_DIRS "include"
         PRIV_INCLUDE_DIRS "."
         REQUIRES mbedtls fatfs json esp_timer

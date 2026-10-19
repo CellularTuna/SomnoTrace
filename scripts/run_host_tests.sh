@@ -162,6 +162,12 @@ run_test update_check_test   -I"$SHIM" -I"$MAIN_DIR" scripts/update_check_test.c
 run_test http_query_test     -I"$SHIM" -I"$MAIN_DIR" scripts/http_query_test.c "$MAIN_DIR/http_query.c" \
     scripts/test_include/httpd_query_shim.c
 
+# SomnoStage Zeo CSV exporter: pure libc, no cJSON or ESP-IDF shims needed.
+# Pins the 30 s grid remap that keeps Gen1 (32 s epoch) nights from drifting
+# in OSCAR's Zeo importer.
+run_test somno_stage_csv_test -I"$SOMNO_DIR" -I"$SOMNO_DIR/include" \
+    scripts/somno_stage_csv_test.c "$SOMNO_DIR/somno_stage_csv.c" -lm
+
 # Web password core (PBKDF2, session tokens, Basic/Origin parsing, rate
 # limiter).  Links the system mbedTLS: apt install libmbedtls-dev.
 if [ -f /usr/include/mbedtls/md.h ]; then
@@ -181,6 +187,7 @@ else
     skip_test edf_gen_test "no cJSON (apt install libcjson-dev, or set CJSON_DIR=<dir with cJSON.c/.h>)"
     skip_test edf_properties_test "no cJSON"
     skip_test upload_ox_test "no cJSON"
+    skip_test upload_stage_test "no cJSON"
     skip_test br_parse_test "no cJSON"
     skip_test br_backend_test "no cJSON"
     skip_test mqtt_live_contract_test "no cJSON"
@@ -198,6 +205,12 @@ if [ -n "$CJ_INC" ]; then
         '-DSD_MOUNT_POINT="/tmp/somnotrace_oxt/sd"' \
         '-DUPLOAD_STATE_DIR="/tmp/somnotrace_oxt/ustate"' \
         scripts/upload_ox_test.c "$UPLOADER_DIR/upload_ox.c" $CJ_SRC $CJ_LIB
+    # Stage CSV upload-state store: scan/reconcile/fingerprint-reset/clear —
+    # the #317 reset path plus the max_days window gating of pending counts.
+    run_test upload_stage_test $CJ_INC -I"$SHIM" -I"$UPLOADER_DIR" \
+        '-DSD_MOUNT_POINT="/tmp/somnotrace_stt/sd"' \
+        '-DUPLOAD_STATE_DIR="/tmp/somnotrace_stt/ustate"' \
+        scripts/upload_stage_test.c "$UPLOADER_DIR/upload_stage.c" $CJ_SRC $CJ_LIB
     # BreathingRoom response parsing: per-file results must never become
     # request-level errors, replaced counts as imported, deferred is surfaced.
     run_test br_parse_test $CJ_INC -I"$UPLOADER_DIR" \
@@ -208,6 +221,7 @@ if [ -n "$CJ_INC" ]; then
     run_test somno_worker_test $CJ_INC -I"$SHIM" -I"$MAIN_DIR" -I"$SOMNO_DIR" \
         -I"$SOMNO_DIR/include" -ffunction-sections -fdata-sections \
         scripts/somno_worker_test.c "$SOMNO_DIR/somno_ml_features.c" \
+        "$SOMNO_DIR/somno_stage_csv.c" \
         -Wl,--gc-sections -Wl,--wrap=somno_feat_create -Wl,--wrap=somno_feat_destroy \
         $CJ_SRC $CJ_LIB -lm
 fi

@@ -41,7 +41,7 @@
  *
  * Layout mirrors the card: root files (STR.edf, Identification.json/.crc)
  * with path "", files under the SETTINGS directory with "/SETTINGS", sessions
- * with "/DATALOG/<day>", ring recordings "/OXYMETRY/<day>" named by the ring's
+ * with "/DATALOG/<day>", ring recordings "/OXIMETRY/<day>" named by the ring's
  * own timestamp (ref->source_name already carries it). */
 
 #include "uploader.h"
@@ -399,7 +399,7 @@ static upload_result_t aer_put_oximetry(const upload_ox_ref_t *ref)
         if (strcmp(rel, "source/source.bin") != 0 &&
             strcmp(rel, "source/source.vld") != 0) continue;
         char subpath[96];
-        snprintf(subpath, sizeof(subpath), "/OXYMETRY/%s", ref->day);
+        snprintf(subpath, sizeof(subpath), "/OXIMETRY/%s", ref->day);
         char filename[128];
         snprintf(filename, sizeof(filename), "%s",
                  ref->source_name[0] ? ref->source_name : "oximetry");
@@ -550,6 +550,7 @@ const upload_backend_t aerivue_backend = {
     .label = "Aerivue",
     .bundle_only_ok = false,    /* an import with no sessions is clutter */
     .supports_ox = true,
+    .supports_stage = false,   /* no Zeo-CSV stage import today; units stay pending until it does */
     .is_configured = aer_is_configured,
     .session_begin = aer_session_begin,
     .day_begin = aer_day_begin,

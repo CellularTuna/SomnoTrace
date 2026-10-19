@@ -144,13 +144,13 @@ MUTANTS = [
     # miniature: the fixed 64-slot table dropped every mark past capacity, so
     # the newest recording re-uploaded forever.
     ("ox-mark-not-linked", "uploader/upload_ox.c",
-     "    u->next = s_states;\n    s_states = u;\n    return u;",
-     "    u->next = s_states;\n    return u;",
+     "    u->next = *pp;\n    *pp = u;\n}",
+     "    u->next = *pp;\n}",
      "a created state never links into the list — lookups miss it, marks are "
      "dropped, and the recording reads pending forever (the 64-slot overflow)"),
     ("ox-fp-reset-lost", "uploader/upload_ox.c",
-     "if (u && u->fingerprint != out[kept].fingerprint) {",
-     "if (u && false) {",
+     "            if (u->fingerprint != out[kept].fingerprint) {",
+     "            if (false) {",
      "changed recording content never resets backend status — stale OK "
      "survives a re-conversion and the new data is never uploaded"),
     ("ox-mark-deferred", "uploader/upload_ox.c",

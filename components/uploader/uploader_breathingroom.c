@@ -594,6 +594,7 @@ const upload_backend_t breathingroom_backend = {
     .label = "BreathingRoom",
     .bundle_only_ok = true,    /* settings-only upload is meaningful */
     .supports_ox = true,
+    .supports_stage = false,   /* no Zeo-CSV stage import today; units stay pending until it does */
     .is_configured = br_is_configured,
     .session_begin = br_session_begin,
     .day_begin = NULL,          /* requests are independent — no day scope */

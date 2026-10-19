@@ -26,6 +26,7 @@
 #include "upload_index.h"
 #include "upload_scan.h"
 #include "upload_ox.h"
+#include "upload_stage.h"
 #include "upload_park.h"
 
 #include <stdio.h>
@@ -85,6 +86,7 @@ typedef struct {
     char     err[72];
     /* live progress, valid while SB_UPLOADING */
     char     cur_day[12];
+    char     cur_kind[12];       /* "cpap" | "oximetry" | "stages" */
     int      cur_unit;
     int      n_units;
 } backend_rt_t;
@@ -94,7 +96,7 @@ static int s_n_rt = 0;
 
 /* ── Module state ─────────────────────────────────────────────────── */
 
-typedef enum { EV_EXPORT = 0, EV_INVALIDATE, EV_SCAN, EV_RESET } ev_type_t;
+typedef enum { EV_EXPORT = 0, EV_INVALIDATE, EV_SCAN, EV_RESET, EV_PASS } ev_type_t;
 
 typedef struct {
     uint8_t  type;
@@ -127,6 +129,7 @@ static upload_sched_busy_fn_t s_therapy_fn;
  * wedge the uploader forever would be a worse defect than the race it closes. */
 static bool    s_probe_active;
 static int64_t s_probe_since_us;
+static bool    s_pass_deferred;
 
 static int64_t s_next_scan_us;
 static bool    s_scanning;
@@ -203,7 +206,7 @@ static void cooldown_reset(backend_rt_t *r)
     r->last_err_permanent = false;
 }
 
-static void ox_mark_day_failed(upload_ox_ref_t *refs, int n_refs, int slot,
+static void ox_mark_day_failed(const upload_ox_ref_t *refs, int n_refs, int slot,
                                const char *day)
 {
     for (int i = 0; i < n_refs; i++) {
@@ -213,10 +216,22 @@ static void ox_mark_day_failed(upload_ox_ref_t *refs, int n_refs, int slot,
     }
 }
 
+static void st_mark_day_failed(const upload_stage_ref_t *refs, int n_refs, int slot,
+                               const char *day)
+{
+    for (int i = 0; i < n_refs; i++) {
+        if (strcmp(refs[i].day, day) != 0) continue;
+        if (upload_stage_status(&refs[i], slot) == UG_OK)
+            upload_stage_mark(&refs[i], slot, UG_FAILED, NULL);
+    }
+}
+
 /* ── One backend pass ─────────────────────────────────────────────────
  * Returns true if the backend did any work (so the caller can log/report). */
 
-static bool run_backend(backend_rt_t *r, int max_days)
+static bool run_backend(backend_rt_t *r, int max_days,
+                        const upload_ox_ref_t *ox_refs, int n_ox,
+                        const upload_stage_ref_t *st_refs, int n_st)
 {
     const upload_backend_t *be = r->be;
 
@@ -249,21 +264,26 @@ static bool run_backend(backend_rt_t *r, int max_days)
     bool have_bundle = upload_scan_bundle(&bundle);
     bool bundle_changed = have_bundle &&
                           (upload_index_bundle_ok_fp(r->slot) != bundle.fp);
-    upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    if (!ox_refs) { set_be_state(r, SB_IDLE); return false; }
-    int n_ox = upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
-    int ox_pending = upload_ox_pending(ox_refs, n_ox, r->slot);
 
-    if (n_days == 0 && !bundle_changed && ox_pending == 0) {
-        free(ox_refs);
+    /* Capability-gated pending: a backend that cannot consume a modality
+     * leaves those units pending forever — they must neither be attempted
+     * nor counted toward this backend's work for the run. */
+    int ox_pending = (be->supports_ox && be->put_oximetry)
+                   ? upload_ox_pending(ox_refs, n_ox, r->slot) : 0;
+    int st_pending = (be->supports_stage && be->put_stage)
+                   ? upload_stage_pending(st_refs, n_st, r->slot) : 0;
+
+    if (n_days == 0 && !bundle_changed && ox_pending == 0 && st_pending == 0) {
+        cooldown_reset(r);
         set_be_state(r, SB_IDLE);
         r->cur_day[0] = '\0';
+        r->cur_kind[0] = '\0';
         return false;
     }
     if (!have_bundle && (n_days > 0 || bundle_changed)) {
         /* CPAP session uploads still require their root bundle. Oximetry
-         * packages are self-contained and may upload before any EDF exists. */
-        free(ox_refs);
+         * packages and stage CSVs are self-contained and may upload before
+         * any EDF exists. */
         set_be_state(r, SB_IDLE);
         return false;
     }
@@ -272,11 +292,10 @@ static bool run_backend(backend_rt_t *r, int max_days)
      * it now; the rest wait for the next session upload to carry it, so a
      * short session that produced no EDFs does not cause a pointless visit. */
     bool bundle_only_run = false;
-    if (n_days == 0 && ox_pending == 0) {
+    if (n_days == 0 && ox_pending == 0 && st_pending == 0) {
         if (!be->bundle_only_ok) {
             ESP_LOGI(TAG, "%s: only root files changed — deferring to the "
                      "next session upload", be->id);
-            free(ox_refs);
             set_be_state(r, SB_IDLE);
             return false;
         }
@@ -297,7 +316,6 @@ static bool run_backend(backend_rt_t *r, int max_days)
         if (attach == 0) {
             ESP_LOGI(TAG, "%s: root files changed but no exported day to attach "
                      "them to — nothing to do", be->id);
-            free(ox_refs);
             set_be_state(r, SB_IDLE);
             return false;
         }
@@ -306,7 +324,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
     }
 
     set_be_state(r, SB_UPLOADING);
-    r->n_units = n_units + ox_pending;
+    r->n_units = n_units + ox_pending + st_pending;
     r->cur_unit = 0;
 
     /* Say plainly which of the two kinds of run this is.  The old message
@@ -321,8 +339,11 @@ static bool run_backend(backend_rt_t *r, int max_days)
         char ox_note[40] = "";
         if (ox_pending > 0)
             snprintf(ox_note, sizeof(ox_note), ", %d oximetry", ox_pending);
-        ESP_LOGI(TAG, "%s: %d day(s), %d unit(s) pending%s%s", be->id, n_days,
-                 n_units, ox_note,
+        char st_note[40] = "";
+        if (st_pending > 0)
+            snprintf(st_note, sizeof(st_note), ", %d stages", st_pending);
+        ESP_LOGI(TAG, "%s: %d day(s), %d unit(s) pending%s%s%s", be->id, n_days,
+                 n_units, ox_note, st_note,
                  bundle_changed ? ", root files changed too" : "");
     }
 
@@ -332,7 +353,6 @@ static bool run_backend(backend_rt_t *r, int max_days)
                                                       : "cannot connect",
                        res == UPLOAD_ERR_PERMANENT);
         if (be->session_end) be->session_end();
-        free(ox_refs);
         return true;
     }
 
@@ -348,7 +368,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
     if (!refs) refs = calloc(UPLOAD_MAX_GROUPS_PER_DAY, sizeof(*refs));
     if (!refs) {
         if (be->session_end) be->session_end();
-        free(ox_refs);
+        set_be_state(r, SB_IDLE);
         return false;
     }
 
@@ -358,6 +378,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
         /* Read by the progress endpoint on the httpd task. */
         xSemaphoreTake(s_lock, portMAX_DELAY);
         strlcpy(r->cur_day, daystr, sizeof(r->cur_day));
+        strlcpy(r->cur_kind, "cpap", sizeof(r->cur_kind));
         xSemaphoreGive(s_lock);
 
         upload_day_t *d = upload_index_day(days[di], false);
@@ -507,6 +528,7 @@ static bool run_backend(backend_rt_t *r, int max_days)
             }
             xSemaphoreTake(s_lock, portMAX_DELAY);
             strlcpy(r->cur_day, ox_refs[oi].day, sizeof(r->cur_day));
+            strlcpy(r->cur_kind, "oximetry", sizeof(r->cur_kind));
             xSemaphoreGive(s_lock);
 
             bool ox_leased = uploader_lease_take(LEASE_WAIT_MS);
@@ -542,8 +564,72 @@ static bool run_backend(backend_rt_t *r, int max_days)
         }
     }
 
+    /* SomnoStage CSVs, tracked independently (upload_stage).  Same transport
+     * scope pattern as oximetry; a backend without supports_stage leaves its
+     * stage units pending so a future release that adds support backfills
+     * them automatically. */
+    if (st_pending > 0 && be->put_stage && be->supports_stage) {
+        char st_day[12] = {0};
+        bool st_day_any = false;
+        for (int i = 0; i < n_st && fails < FAILS_BEFORE_SWITCH; i++) {
+            if (upload_stage_status(&st_refs[i], r->slot) == UG_OK) continue;
+            if (strcmp(st_day, st_refs[i].day) != 0) {
+                if (st_day_any && be->stage_day_end) {
+                    res = be->stage_day_end(st_day, true);
+                    if (res != UPLOAD_OK) {
+                        st_mark_day_failed(st_refs, n_st, r->slot, st_day);
+                        fails++;
+                        strlcpy(r->err, "stage finalise failed", sizeof(r->err));
+                    }
+                }
+                strlcpy(st_day, st_refs[i].day, sizeof(st_day));
+                st_day_any = false;
+                res = be->stage_day_begin ? be->stage_day_begin(st_day)
+                                          : UPLOAD_OK;
+                if (res != UPLOAD_OK) {
+                    fails++;
+                    strlcpy(r->err, "cannot open stage day", sizeof(r->err));
+                    break;
+                }
+            }
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            strlcpy(r->cur_day, st_refs[i].day, sizeof(r->cur_day));
+            strlcpy(r->cur_kind, "stages", sizeof(r->cur_kind));
+            xSemaphoreGive(s_lock);
+
+            bool st_leased = uploader_lease_take(LEASE_WAIT_MS);
+            if (!st_leased) {
+                ESP_LOGI(TAG, "%s: storage busy, deferring stage %s",
+                         be->id, st_refs[i].unit_id);
+                deferred_busy = true;
+                continue;
+            }
+            res = be->put_stage(&st_refs[i]);
+            uploader_lease_give();
+            upload_stage_mark(&st_refs[i], r->slot,
+                              res == UPLOAD_OK ? UG_OK : UG_FAILED, NULL);
+            if (res == UPLOAD_OK) {
+                st_day_any = true;
+                any_ok = true;
+                r->cur_unit++;
+                r->last_ok_s = now_s();
+            } else {
+                fails++;
+                ESP_LOGW(TAG, "%s: stage %s failed", be->id,
+                         st_refs[i].unit_id);
+            }
+        }
+        if (st_day_any && st_day[0] && be->stage_day_end) {
+            res = be->stage_day_end(st_day, true);
+            if (res != UPLOAD_OK) {
+                st_mark_day_failed(st_refs, n_st, r->slot, st_day);
+                fails++;
+                strlcpy(r->err, "stage finalise failed", sizeof(r->err));
+            }
+        }
+    }
+
     free(refs);
-    free(ox_refs);
     if (be->session_end) be->session_end();
 
     if (bundle_committed) {
@@ -599,6 +685,16 @@ static bool probe_in_flight(void)
     return held;
 }
 
+/* Why an upload pass cannot start right now, or NULL.  One predicate shared
+ * by run_pass (which enforces the deferral) and sched_task (which must not
+ * busy-wait on a deadline the pass cannot consume). */
+static const char *pass_block_reason(void)
+{
+    if (probe_in_flight()) return "a connection test is in flight";
+    if (s_therapy_fn && s_therapy_fn()) return "therapy in progress";
+    return NULL;
+}
+
 static void run_pass(void)
 {
     /* ONE choke point, deliberately. Every route into a run -- the periodic
@@ -606,19 +702,27 @@ static void run_pass(void)
      * so guarding here defers all of them.  Guarding only the periodic scan
      * (as the s_busy_fn hook above does) would leave the event-driven paths
      * free to open a second transport beside the probe, which is the exact
-     * contention this is meant to prevent. */
-    if (probe_in_flight()) {
-        ESP_LOGD(TAG, "upload pass deferred: a connection test is in flight");
+     * contention this is meant to prevent.  The index keeps accumulating
+     * pending groups; nothing is lost.  Deliberately no status write — the
+     * accurate badge stays "N parts pending". */
+    static const char *s_deferred_why;
+    const char *blocked = pass_block_reason();
+    if (blocked) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_pass_deferred = true;
+        xSemaphoreGive(s_lock);
+        if (s_deferred_why != blocked) {
+            s_deferred_why = blocked;
+            ESP_LOGI(TAG, "upload pass deferred: %s", blocked);
+        }
         return;
     }
-
-    if (s_therapy_fn && s_therapy_fn()) {
-        /* One choke point again: deferring here covers the periodic tick,
-         * EV_EXPORT, EV_SCAN and manual requests alike.  The index keeps
-         * accumulating pending groups; nothing is lost.  Deliberately no
-         * status write — the accurate badge stays "N parts pending". */
-        ESP_LOGD(TAG, "upload pass deferred: therapy in progress");
-        return;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_pass_deferred = false;
+    xSemaphoreGive(s_lock);
+    if (s_deferred_why) {
+        s_deferred_why = NULL;
+        ESP_LOGD(TAG, "upload pass resumed");
     }
 
     const upload_backend_t *bes[UPLOAD_MAX_BACKENDS];
@@ -630,33 +734,53 @@ static void run_pass(void)
         return;
     }
 
+    /* Reconcile oximetry and stage exports once for the whole pass (under the
+     * storage lease if available) and share the ref slices across all backends
+     * instead of re-walking and re-CRCing the SD card per backend + summary.
+     * If either PSRAM allocation fails, CPAP and the surviving stream still
+     * run rather than aborting the whole pass. */
+    upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
+    upload_stage_ref_t *st_refs = heap_caps_malloc(sizeof(upload_stage_ref_t) * UPLOAD_STAGE_MAX_UNITS, MALLOC_CAP_SPIRAM);
+    if (!ox_refs || !st_refs)
+        ESP_LOGW(TAG, "PSRAM low — skipping %s reconcile this pass",
+                 (!ox_refs && !st_refs) ? "oximetry/stage" : (!ox_refs ? "oximetry" : "stage"));
+    bool rec_leased = (ox_refs || st_refs) ? uploader_lease_take(LEASE_WAIT_MS) : false;
+    int n_ox = (rec_leased && ox_refs) ? upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days) : 0;
+    int n_st = (rec_leased && st_refs) ? upload_stage_reconcile(st_refs, UPLOAD_STAGE_MAX_UNITS, max_days) : 0;
+    if (rec_leased) uploader_lease_give();
+
     for (int i = 0; i < n; i++) {
         backend_rt_t *r = rt_for(bes[i]);
         if (!r || r->slot < 0) continue;
 
         if (!bes[i]->is_configured || !bes[i]->is_configured()) {
+            cooldown_reset(r);
             set_be_state(r, SB_DISABLED);
             continue;
         }
         if (r->state == SB_COOLDOWN && now_us() < r->retry_at_us) continue;
 
         set_status("Uploading to %s", bes[i]->label ? bes[i]->label : bes[i]->id);
-        run_backend(r, max_days);
+        run_backend(r, max_days, ox_refs, n_ox, st_refs, n_st);
     }
 
-    /* Summarise for the UI. */
+    free(ox_refs);
+    free(st_refs);
+
+    /* Summarise for the UI.  Per-stream counts are capability-gated: a
+     * backend that cannot consume oximetry or stages does not report those
+     * units as pending work. */
     int pending = 0;
     bool cooling = false;
-    upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    if (!ox_refs) { set_status("Memory low"); return; }
-    int n_ox = upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
     for (int i = 0; i < s_n_rt; i++) {
         if (s_rt[i].state == SB_DISABLED) continue;
         pending += upload_index_backend_pending(s_rt[i].slot, max_days);
-        pending += upload_ox_pending(ox_refs, n_ox, s_rt[i].slot);
+        if (s_rt[i].be->supports_ox && s_rt[i].be->put_oximetry)
+            pending += upload_ox_cached_pending(s_rt[i].slot);
+        if (s_rt[i].be->supports_stage && s_rt[i].be->put_stage)
+            pending += upload_stage_cached_pending(s_rt[i].slot);
         if (s_rt[i].state == SB_COOLDOWN) cooling = true;
     }
-    free(ox_refs);
     if (pending == 0) set_status("All uploaded");
     else if (cooling)  set_status("%d parts pending — waiting to retry", pending);
     else               set_status("%d parts pending", pending);
@@ -715,10 +839,20 @@ static void do_scan(void)
     s_scanning = true;
     set_status("Scanning for new data");
     upload_scan_reconcile_all(max_days, slots, n_slots);
-    upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    if (ox_refs) {
-        upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
-        free(ox_refs);
+    /* If run_pass() will be deferred by a gate right after this scan, update
+     * oximetry/stage window membership here; otherwise run_pass() reconciles
+     * both once at the top of the pass. */
+    if (pass_block_reason()) {
+        upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
+        if (ox_refs) {
+            upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
+            free(ox_refs);
+        }
+        upload_stage_ref_t *st_refs = heap_caps_malloc(sizeof(upload_stage_ref_t) * UPLOAD_STAGE_MAX_UNITS, MALLOC_CAP_SPIRAM);
+        if (st_refs) {
+            upload_stage_reconcile(st_refs, UPLOAD_STAGE_MAX_UNITS, max_days);
+            free(st_refs);
+        }
     }
     s_scanning = false;
     uploader_lease_give();
@@ -732,23 +866,46 @@ static void sched_task(void *arg)
      * migration walk the SD and print JSON — too much stack for app_main's
      * main task.  Everything else lazy-inits through scan/status paths. */
     upload_ox_init();
+    upload_stage_init();
     ESP_LOGI(TAG, "upload scheduler started on core %d", xPortGetCoreID());
 
     s_next_scan_us = now_us() + (int64_t)FIRST_SCAN_DELAY_MS * 1000;
     set_status("Waiting for first scan");
 
     while (1) {
-        /* Sleep until the next scan or the earliest cooldown expiry. */
+        /* Sleep until the next scan or (when passes are not gated) the
+         * earliest cooldown expiry.  While a pass is gated (probe or therapy
+         * hold), cooldown deadlines cannot be consumed by run_pass() — folding
+         * an already-expired retry_at_us into wake_us would pin wait=0 and
+         * spin this task at 100% CPU, starving IDLE0 until the task watchdog
+         * fires.  Normal hold releases wake the task via EV_EXPORT/EV_SCAN/
+         * EV_PASS; a leaked probe claim is bounded by UPLOAD_PROBE_MAX_MS. */
+        int64_t now = now_us();
         int64_t wake_us = s_next_scan_us;
-        for (int i = 0; i < s_n_rt; i++) {
-            if (s_rt[i].state == SB_COOLDOWN && s_rt[i].retry_at_us > 0 &&
-                s_rt[i].retry_at_us < wake_us) {
-                wake_us = s_rt[i].retry_at_us;
+        if (!pass_block_reason()) {
+            for (int i = 0; i < s_n_rt; i++) {
+                if (s_rt[i].state == SB_COOLDOWN && s_rt[i].retry_at_us > 0 &&
+                    s_rt[i].retry_at_us < wake_us) {
+                    wake_us = s_rt[i].retry_at_us;
+                }
             }
+        } else {
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            if (s_probe_active) {
+                int64_t probe_exp = s_probe_since_us +
+                                    (int64_t)UPLOAD_PROBE_MAX_MS * 1000;
+                if (probe_exp < wake_us) wake_us = probe_exp;
+            }
+            xSemaphoreGive(s_lock);
         }
-        int64_t delay_us = wake_us - now_us();
-        if (delay_us < 0) delay_us = 0;
-        TickType_t wait = pdMS_TO_TICKS(delay_us / 1000);
+        int64_t delay_us = wake_us - now;
+        /* Round positive delays UP + 1 tick: at CONFIG_FREERTOS_HZ=100 (10 ms
+         * per tick), truncating delay_us/1000 plus a partial first tick wakes
+         * xQueueReceive a few ms before wake_us, causing now_us() >= wake_us
+         * checks below to miss and spin until the tick boundary passes. */
+        TickType_t wait = (delay_us > 0)
+                        ? (pdMS_TO_TICKS((delay_us + 999) / 1000) + 1)
+                        : 0;
 
         sched_ev_t ev;
         bool got = (xQueueReceive(s_queue, &ev, wait) == pdTRUE);
@@ -772,13 +929,23 @@ static void sched_task(void *arg)
             case EV_RESET:
                 ESP_LOGW(TAG, "upload state reset — re-uploading newest %d day(s)",
                          uploader_max_days());
+                /* #317: the index clear alone used to silently fail on the
+                 * ox/ subdirectory and never touched the in-memory lists, so
+                 * old oximetry stayed marked uploaded.  Clear all three
+                 * trackers — disk and RAM — before rescanning. */
                 upload_index_clear();
+                upload_ox_clear();
+                upload_stage_clear();
                 for (int i = 0; i < s_n_rt; i++) {
                     cooldown_reset(&s_rt[i]);
                     set_be_state(&s_rt[i], SB_IDLE);
                     s_rt[i].last_ok_s = 0;
                 }
                 do_scan();
+                run_pass();
+                break;
+
+            case EV_PASS:
                 run_pass();
                 break;
 
@@ -884,9 +1051,23 @@ bool upload_sched_probe_begin(void)
 
 void upload_sched_probe_end(void)
 {
+    bool wake = false;
+    int64_t now = now_us();
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_probe_active = false;
+    if (s_pass_deferred) {
+        wake = true;
+    } else {
+        for (int i = 0; i < s_n_rt; i++) {
+            if (s_rt[i].state == SB_COOLDOWN && s_rt[i].retry_at_us > 0 &&
+                s_rt[i].retry_at_us <= now) {
+                wake = true;
+                break;
+            }
+        }
+    }
     xSemaphoreGive(s_lock);
+    if (wake) post(EV_PASS, 0);
 }
 
 /* ── Progress reporting ───────────────────────────────────────────── */
@@ -938,22 +1119,46 @@ esp_err_t upload_sched_progress_json(char **out_json)
         cJSON_AddStringToObject(o, "state",
                                 conf ? state_name(r->state) : "disabled");
 
-        int done = 0, total = 0;
-        upload_index_backend_progress(r->slot, max_days, &done, &total);
-        cJSON_AddNumberToObject(o, "days_done", done);
-        cJSON_AddNumberToObject(o, "days_total", total);
+        int cpap_done = 0, cpap_total = 0;
+        upload_index_backend_progress(r->slot, max_days, &cpap_done, &cpap_total);
+
+        bool sup_ox = r->be->supports_ox && r->be->put_oximetry != NULL;
+        int ox_done = 0, ox_total = 0;
+        if (sup_ox)
+            upload_ox_backend_progress(r->slot, max_days, &ox_done, &ox_total);
+
+        bool sup_st = r->be->supports_stage && r->be->put_stage != NULL;
+        int st_done = 0, st_total = 0;
+        if (sup_st)
+            upload_stage_backend_progress(r->slot, max_days, &st_done, &st_total);
+
+        int units_done  = cpap_done + ox_done + st_done;
+        int units_total = cpap_total + ox_total + st_total;
+
+        cJSON_AddNumberToObject(o, "days_done", cpap_done);
+        cJSON_AddNumberToObject(o, "days_total", cpap_total);
+        cJSON_AddBoolToObject(o, "supports_ox", sup_ox);
+        cJSON_AddNumberToObject(o, "ox_done", ox_done);
+        cJSON_AddNumberToObject(o, "ox_total", ox_total);
+        cJSON_AddBoolToObject(o, "supports_stage", sup_st);
+        cJSON_AddNumberToObject(o, "stage_done", st_done);
+        cJSON_AddNumberToObject(o, "stage_total", st_total);
+        cJSON_AddNumberToObject(o, "units_done", units_done);
+        cJSON_AddNumberToObject(o, "units_total", units_total);
 
         if (r->last_ok_s) cJSON_AddNumberToObject(o, "last_ok_s", r->last_ok_s);
 
-        char cur_day[12], err[72];
+        char cur_day[12], cur_kind[12], err[72];
         xSemaphoreTake(s_lock, portMAX_DELAY);
         strlcpy(cur_day, r->cur_day, sizeof(cur_day));
+        strlcpy(cur_kind, r->cur_kind, sizeof(cur_kind));
         strlcpy(err, r->err, sizeof(err));
         xSemaphoreGive(s_lock);
 
         if (r->state == SB_UPLOADING && cur_day[0]) {
             cJSON *cur = cJSON_AddObjectToObject(o, "cur");
             cJSON_AddStringToObject(cur, "day", cur_day);
+            if (cur_kind[0]) cJSON_AddStringToObject(cur, "kind", cur_kind);
             cJSON_AddNumberToObject(cur, "unit", r->cur_unit);
             cJSON_AddNumberToObject(cur, "units", r->n_units);
         }
@@ -981,7 +1186,10 @@ void upload_sched_summary(int *out_pending, const char **out_worst)
         backend_rt_t *r = &s_rt[i];
         if (!r->be || !r->be->is_configured || !r->be->is_configured()) continue;
         pending += upload_index_backend_pending(r->slot, max_days);
-        pending += upload_ox_cached_pending(r->slot);
+        if (r->be->supports_ox && r->be->put_oximetry)
+            pending += upload_ox_cached_pending(r->slot);
+        if (r->be->supports_stage && r->be->put_stage)
+            pending += upload_stage_cached_pending(r->slot);
         if (r->state == SB_COOLDOWN) worst = "cooldown";
         else if (r->state == SB_UPLOADING && strcmp(worst, "cooldown") != 0)
             worst = "uploading";

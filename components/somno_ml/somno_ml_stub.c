@@ -88,3 +88,8 @@ int somno_ml_sst_validate(const char *path, char *semver_out, size_t semver_len)
     (void)semver_len;
     return -1;
 }
+
+void somno_ml_set_stage_export_cb(somno_ml_stage_export_cb_t cb)
+{
+    (void)cb;
+}

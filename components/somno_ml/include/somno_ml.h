@@ -132,6 +132,13 @@ void somno_ml_live_state(somno_ml_live_state_t *out);
  * flags (>=0) on success, -1 on failure; optionally copies semver out. */
 int somno_ml_sst_validate(const char *path, char *semver_out, size_t semver_len);
 
+/* Optional hook invoked after a new Zeo-compatible stage CSV has been
+ * written to .somnotrace/stages/.  Injected by the app (uploader scan
+ * trigger) so this component never depends on the uploader.  Called from
+ * the scoring/reconcile context — must be cheap and non-blocking. */
+typedef void (*somno_ml_stage_export_cb_t)(void);
+void somno_ml_set_stage_export_cb(somno_ml_stage_export_cb_t cb);
+
 #ifdef __cplusplus
 }
 #endif

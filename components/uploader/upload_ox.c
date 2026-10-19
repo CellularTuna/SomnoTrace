@@ -63,11 +63,13 @@ static const char *TAG = "up_ox";
  * silently dropped — the same file went to SleepHQ on every pass.  A list
  * plus per-recording files removes the capacity question entirely.
  *
- * s_lock guards the list: upload_ox_status_json() runs on the httpd task,
- * everything else on the scheduler task. */
+ * s_lock guards the list: progress and summary queries run on the httpd and
+ * MQTT tasks, everything else on the scheduler task. */
 typedef struct ox_state_s {
     struct ox_state_s *next;
     uint8_t  dirty;         /* needs its file rewritten                   */
+    uint8_t  in_window;     /* inside the newest max_days on the last
+                             * reconcile — pending/progress ignore the rest */
     char     id[UPLOAD_OX_ID_LEN];
     char     day[12];       /* noon-day folder — for existence checks     */
     uint32_t generation;
@@ -154,10 +156,32 @@ static ox_state_t *state_find_id(const char *id)
     return NULL;
 }
 
+/* Keep s_states sorted by u->day descending so all units for a day are
+ * contiguous and window/progress queries run in a single O(N) pass. */
+static void state_insert_locked(ox_state_t *u)
+{
+    ox_state_t **pp = &s_states;
+    while (*pp && strcmp((*pp)->day, u->day) > 0)
+        pp = &(*pp)->next;
+    u->next = *pp;
+    *pp = u;
+}
+
+static void state_reposition_locked(ox_state_t *u)
+{
+    for (ox_state_t **pp = &s_states; *pp; pp = &(*pp)->next) {
+        if (*pp == u) {
+            *pp = u->next;
+            break;
+        }
+    }
+    state_insert_locked(u);
+}
+
 /* Look up the state for a recording, optionally creating it.  One node per
  * recording_id: a generation bump (re-conversion) resets the node in place —
  * the unit file is per recording, not per generation.  Scalar args, not a
- * ref: upload_ox_ref_t is ~5.5 KB of path buffers and several callers run
+ * ref: upload_ox_ref_t is ~1.3 KB of path buffers and several callers run
  * this in a loop on modest task stacks. */
 static ox_state_t *state_get(const char *id, const char *day, uint32_t gen,
                              uint64_t fp, bool create)
@@ -174,6 +198,7 @@ static ox_state_t *state_get(const char *id, const char *day, uint32_t gen,
         if (!u->day[0] && day && day[0]) {
             strlcpy(u->day, day, sizeof(u->day));
             u->dirty = true;
+            state_reposition_locked(u);
         }
         return u;
     }
@@ -185,8 +210,7 @@ static ox_state_t *state_get(const char *id, const char *day, uint32_t gen,
     if (day) strlcpy(u->day, day, sizeof(u->day));
     u->generation = gen;
     u->fingerprint = fp;
-    u->next = s_states;
-    s_states = u;
+    state_insert_locked(u);
     return u;
 }
 
@@ -426,6 +450,7 @@ static void resolve_orphan_days_locked(void)
             if (u && !u->day[0]) {
                 strlcpy(u->day, e->d_name, sizeof(u->day));
                 u->dirty = true;
+                state_reposition_locked(u);
             }
         }
         closedir(dd);
@@ -444,6 +469,28 @@ static void resolve_orphan_days_locked(void)
         *pp = u->next;
         free(u);
     }
+}
+
+/* Mark only the newest max_days distinct day folders in s_states as
+ * in_window.  Used at init (before the first card scan) and if max_days
+ * changes between scans so progress never over-counts older persisted
+ * history at boot and then jumps backward on the first reconcile. */
+static int s_window_days;
+
+static void apply_window_locked(int max_days)
+{
+    if (max_days < 1) max_days = 1;
+    int days_seen = 0;
+    const char *last_day = "";
+    for (ox_state_t *u = s_states; u; u = u->next) {
+        if (!u->day[0]) { u->in_window = false; continue; }
+        if (strcmp(u->day, last_day) != 0) {
+            last_day = u->day;
+            days_seen++;
+        }
+        u->in_window = (days_seen <= max_days);
+    }
+    s_window_days = max_days;
 }
 
 esp_err_t upload_ox_init(void)
@@ -479,6 +526,7 @@ esp_err_t upload_ox_init(void)
 
     migrate_legacy();
     resolve_orphan_days_locked();
+    apply_window_locked(UPLOAD_DEFAULT_MAX_DAYS);
     save_all_locked();
 
     s_loaded = true;
@@ -495,13 +543,14 @@ esp_err_t upload_ox_save(void)
     return ret;
 }
 
-static int scan_day(const char *day, upload_ox_ref_t *out, int max_out)
+static int scan_day(const char *day, upload_ox_ref_t *out, int max_out,
+                    bool *truncated)
 {
     char day_path[UPLOAD_OX_PATH_LEN];
     if (!valid_day(day) || !join2(day_path, sizeof(day_path), OX_RECORDINGS_DIR, day)) return 0;
     DIR *d = opendir(day_path); if (!d) return 0;
     int n = 0; struct dirent *e;
-    while ((e = readdir(d)) && n < max_out) {
+    while ((e = readdir(d)) != NULL) {
         if (!safe_component(e->d_name, UPLOAD_OX_ID_LEN)) continue;
         char root[UPLOAD_OX_PATH_LEN]; if (!join2(root, sizeof(root), day_path, e->d_name)) continue;
         char pointer[UPLOAD_OX_PATH_LEN]; if (!join2(pointer, sizeof(pointer), root, "recording.json")) continue;
@@ -514,6 +563,11 @@ static int scan_day(const char *day, upload_ox_ref_t *out, int max_out)
         if (!cJSON_IsString(state) || strcmp(state->valuestring, "ready") != 0 ||
             cJSON_IsFalse(uploadable) || !cJSON_IsString(id) || !cJSON_IsNumber(gen) ||
             !safe_component(id->valuestring, UPLOAD_OX_ID_LEN)) { cJSON_Delete(p); continue; }
+        if (n >= max_out) {
+            if (truncated) *truncated = true;
+            cJSON_Delete(p);
+            break;
+        }
         upload_ox_ref_t *r = &out[n]; memset(r, 0, sizeof(*r));
         strlcpy(r->day, day, sizeof(r->day)); strlcpy(r->recording_id, id->valuestring, sizeof(r->recording_id));
         r->generation = (uint32_t)gen->valuedouble; strlcpy(r->root_path, root, sizeof(r->root_path));
@@ -547,7 +601,7 @@ static int scan_day(const char *day, upload_ox_ref_t *out, int max_out)
     closedir(d); return n;
 }
 
-int upload_ox_scan(upload_ox_ref_t *out, int max_out)
+static int scan_days(upload_ox_ref_t *out, int max_out, int max_days)
 {
     if (!out || max_out <= 0) return 0;
     upload_ox_init();
@@ -591,26 +645,43 @@ int upload_ox_scan(upload_ox_ref_t *out, int max_out)
     }
     closedir(root);
 
-    int n = 0, i = 0;
-    for (i = 0; i < nd && n < max_out; i++) {
-        n += scan_day(days[i], &out[n], max_out - n);
+    int n = 0, i = 0, days_with_data = 0;
+    bool truncated = false;
+    for (i = 0; i < nd; i++) {
+        if (max_days > 0 && days_with_data >= max_days) break;
+        if (n >= max_out) { truncated = true; break; }
+        int added = scan_day(days[i], &out[n], max_out - n, &truncated);
+        if (added > 0) {
+            n += added;
+            days_with_data++;
+        }
+        if (truncated) break;
     }
-    if (i < nd)
+    if (truncated)
         ESP_LOGW(TAG, "more than %d recordings on the card — oldest day(s) "
                  "not visible to the uploader this pass", max_out);
     free(days);
     return n;
 }
 
+int upload_ox_scan(upload_ox_ref_t *out, int max_out)
+{
+    return scan_days(out, max_out, 0);
+}
+
 int upload_ox_reconcile(upload_ox_ref_t *out, int max_out, int max_days)
 {
-    int n = upload_ox_scan(out, max_out);
     if (max_days < 1) max_days = 1;
+    int n = scan_days(out, max_out, max_days);
     if (!ox_lock_init()) {
         ESP_LOGE(TAG, "state lock unavailable — oximetry pass skipped");
         return 0;
     }
     ox_lock();
+    /* Window membership is recomputed every reconcile: only recordings in
+     * the newest max_days distinct day folders count toward the pending and
+     * progress numbers — anything older stays tracked but out of view. */
+    for (ox_state_t *u = s_states; u; u = u->next) u->in_window = false;
     int kept = 0, days_seen = 0; char last_day[12] = {0};
     for (int i = 0; i < n; i++) {
         if (strcmp(last_day, out[i].day) != 0) {
@@ -621,12 +692,15 @@ int upload_ox_reconcile(upload_ox_ref_t *out, int max_out, int max_days)
         ox_state_t *u = state_get(out[kept].recording_id, out[kept].day,
                                   out[kept].generation, out[kept].fingerprint,
                                   true);
-        if (u && u->fingerprint != out[kept].fingerprint) {
-            /* Content changed since last seen — re-upload for all backends. */
-            u->fingerprint = out[kept].fingerprint;
-            memset(u->backend, 0, sizeof(u->backend));
-            memset(u->remote, 0, sizeof(u->remote));
-            u->dirty = true;
+        if (u) {
+            u->in_window = true;
+            if (u->fingerprint != out[kept].fingerprint) {
+                /* Content changed since last seen — re-upload for all backends. */
+                u->fingerprint = out[kept].fingerprint;
+                memset(u->backend, 0, sizeof(u->backend));
+                memset(u->remote, 0, sizeof(u->remote));
+                u->dirty = true;
+            }
         }
         kept++;
     }
@@ -665,6 +739,7 @@ int upload_ox_reconcile(upload_ox_ref_t *out, int max_out, int max_days)
     }
 
     save_all_locked();
+    s_window_days = max_days;
     ox_unlock();
     return kept;
 }
@@ -723,37 +798,104 @@ int upload_ox_cached_pending(int backend_slot)
     /* No lazy init here: upload_ox_init() does SD I/O and JSON printing now,
      * too heavy for whatever task a summary query happens to arrive on (the
      * MQTT task has 8 KB).  The scheduler inits at startup; before that the
-     * honest answer is "nothing loaded". */
+     * honest answer is "nothing loaded".  Only in-window units count — the
+     * last reconcile fixed membership; recordings beyond the upload window
+     * are tracked but are not outstanding work. */
     if (!s_loaded || backend_slot < 0 || backend_slot >= OX_MAX_BACKENDS_LOCAL) return 0;
     ox_lock();
     int n = 0;
     for (ox_state_t *u = s_states; u; u = u->next) {
-        if (u->backend[backend_slot].status != UG_OK) n++;
+        if (u->in_window && u->backend[backend_slot].status != UG_OK) n++;
     }
     ox_unlock();
     return n;
 }
 
+void upload_ox_backend_progress(int backend_slot, int max_days,
+                                int *out_done, int *out_total)
+{
+    int done = 0, total = 0;
+    if (s_loaded && backend_slot >= 0 && backend_slot < OX_MAX_BACKENDS_LOCAL) {
+        ox_lock();
+        if (max_days > 0 && max_days != s_window_days)
+            apply_window_locked(max_days);
+        /* Count distinct in-window days in a single pass (s_states is kept
+         * sorted by day descending): a day is done when every recording in it
+         * is UG_OK, matching CPAP's day-bundle semantics. */
+        const char *cur_day = NULL;
+        bool day_ok = true;
+        for (ox_state_t *u = s_states; u; u = u->next) {
+            if (!u->in_window || !u->day[0]) continue;
+            if (!cur_day || strcmp(u->day, cur_day) != 0) {
+                if (cur_day && day_ok) done++;
+                cur_day = u->day;
+                day_ok = true;
+                total++;
+            }
+            if (u->backend[backend_slot].status != UG_OK)
+                day_ok = false;
+        }
+        if (cur_day && day_ok) done++;
+        ox_unlock();
+    }
+    if (out_done) *out_done = done;
+    if (out_total) *out_total = total;
+}
+
+esp_err_t upload_ox_clear(void)
+{
+    if (!ox_lock_init()) return ESP_ERR_NO_MEM;
+    ox_lock();
+
+    DIR *d = opendir(OX_STATE_DIR);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.') continue;
+            char path[UPLOAD_OX_PATH_LEN];
+            if (snprintf(path, sizeof(path), "%s/%s", OX_STATE_DIR, e->d_name) <
+                (int)sizeof(path)) {
+                unlink(path);
+            }
+        }
+        closedir(d);
+    }
+
+    while (s_states) {
+        ox_state_t *next = s_states->next;
+        free(s_states);
+        s_states = next;
+    }
+    s_window_days = 0;
+
+    ESP_LOGI(TAG, "oximetry upload state cleared");
+    ox_unlock();
+    return ESP_OK;
+}
+
 char *upload_ox_status_json(void)
 {
-    upload_ox_ref_t *refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    if (!refs) return NULL;
-    int n = upload_ox_scan(refs, UPLOAD_OX_MAX_UNITS);
-    cJSON *arr = cJSON_CreateArray(); if (!arr) { free(refs); return NULL; }
-    for (int i = 0; i < n; i++) {
+    if (!s_loaded || !ox_lock_init()) return strdup("[]");
+    ox_lock();
+    cJSON *arr = cJSON_CreateArray();
+    if (!arr) { ox_unlock(); return NULL; }
+    for (ox_state_t *s = s_states; s; s = s->next) {
         cJSON *u = cJSON_CreateObject();
-        cJSON_AddStringToObject(u, "recording_id", refs[i].recording_id);
-        cJSON_AddStringToObject(u, "day", refs[i].day);
-        cJSON_AddNumberToObject(u, "generation", refs[i].generation);
+        cJSON_AddStringToObject(u, "recording_id", s->id);
+        cJSON_AddStringToObject(u, "day", s->day);
+        cJSON_AddNumberToObject(u, "generation", s->generation);
         cJSON *bes = cJSON_AddArrayToObject(u, "backends");
         for (int b = 0; b < OX_MAX_BACKENDS_LOCAL; b++) {
             cJSON *be = cJSON_CreateObject();
             cJSON_AddNumberToObject(be, "slot", b);
             cJSON_AddStringToObject(be, "id", upload_index_backend_name(b));
-            cJSON_AddStringToObject(be, "status", status_name(upload_ox_status(&refs[i], b)));
+            cJSON_AddStringToObject(be, "status", status_name(s->backend[b].status));
             cJSON_AddItemToArray(bes, be);
         }
         cJSON_AddItemToArray(arr, u);
     }
-    char *out = cJSON_PrintUnformatted(arr); cJSON_Delete(arr); free(refs); return out;
+    ox_unlock();
+    char *out = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    return out;
 }
