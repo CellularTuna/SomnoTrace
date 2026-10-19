@@ -42,9 +42,9 @@
 /* Bounds the ref array returned per pass — same trade-off as oximetry:
  * exceeding this only hides the oldest units from one pass, the persisted
  * state itself is unbounded. */
-#define UPLOAD_STAGE_MAX_UNITS 128
+#define UPLOAD_STAGE_MAX_UNITS 768
 #define UPLOAD_STAGE_ID_LEN    64
-#define UPLOAD_STAGE_PATH_LEN  512
+#define UPLOAD_STAGE_PATH_LEN  192
 
 /* One stage unit as it exists on the card, ready to hand to a backend.
  * csv_path is the Zeo-compatible export; sst_path locates the internal

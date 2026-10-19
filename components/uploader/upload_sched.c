@@ -206,7 +206,7 @@ static void cooldown_reset(backend_rt_t *r)
     r->last_err_permanent = false;
 }
 
-static void ox_mark_day_failed(upload_ox_ref_t *refs, int n_refs, int slot,
+static void ox_mark_day_failed(const upload_ox_ref_t *refs, int n_refs, int slot,
                                const char *day)
 {
     for (int i = 0; i < n_refs; i++) {
@@ -216,7 +216,7 @@ static void ox_mark_day_failed(upload_ox_ref_t *refs, int n_refs, int slot,
     }
 }
 
-static void st_mark_day_failed(upload_stage_ref_t *refs, int n_refs, int slot,
+static void st_mark_day_failed(const upload_stage_ref_t *refs, int n_refs, int slot,
                                const char *day)
 {
     for (int i = 0; i < n_refs; i++) {
@@ -229,7 +229,9 @@ static void st_mark_day_failed(upload_stage_ref_t *refs, int n_refs, int slot,
 /* ── One backend pass ─────────────────────────────────────────────────
  * Returns true if the backend did any work (so the caller can log/report). */
 
-static bool run_backend(backend_rt_t *r, int max_days)
+static bool run_backend(backend_rt_t *r, int max_days,
+                        const upload_ox_ref_t *ox_refs, int n_ox,
+                        const upload_stage_ref_t *st_refs, int n_st)
 {
     const upload_backend_t *be = r->be;
 
@@ -262,15 +264,6 @@ static bool run_backend(backend_rt_t *r, int max_days)
     bool have_bundle = upload_scan_bundle(&bundle);
     bool bundle_changed = have_bundle &&
                           (upload_index_bundle_ok_fp(r->slot) != bundle.fp);
-    upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    upload_stage_ref_t *st_refs = heap_caps_malloc(sizeof(upload_stage_ref_t) * UPLOAD_STAGE_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    if (!ox_refs || !st_refs) {
-        free(ox_refs); free(st_refs);
-        set_be_state(r, SB_IDLE);
-        return false;
-    }
-    int n_ox = upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
-    int n_st = upload_stage_reconcile(st_refs, UPLOAD_STAGE_MAX_UNITS, max_days);
 
     /* Capability-gated pending: a backend that cannot consume a modality
      * leaves those units pending forever — they must neither be attempted
@@ -281,7 +274,6 @@ static bool run_backend(backend_rt_t *r, int max_days)
                    ? upload_stage_pending(st_refs, n_st, r->slot) : 0;
 
     if (n_days == 0 && !bundle_changed && ox_pending == 0 && st_pending == 0) {
-        free(ox_refs); free(st_refs);
         cooldown_reset(r);
         set_be_state(r, SB_IDLE);
         r->cur_day[0] = '\0';
@@ -292,7 +284,6 @@ static bool run_backend(backend_rt_t *r, int max_days)
         /* CPAP session uploads still require their root bundle. Oximetry
          * packages and stage CSVs are self-contained and may upload before
          * any EDF exists. */
-        free(ox_refs); free(st_refs);
         set_be_state(r, SB_IDLE);
         return false;
     }
@@ -305,7 +296,6 @@ static bool run_backend(backend_rt_t *r, int max_days)
         if (!be->bundle_only_ok) {
             ESP_LOGI(TAG, "%s: only root files changed — deferring to the "
                      "next session upload", be->id);
-            free(ox_refs); free(st_refs);
             set_be_state(r, SB_IDLE);
             return false;
         }
@@ -326,7 +316,6 @@ static bool run_backend(backend_rt_t *r, int max_days)
         if (attach == 0) {
             ESP_LOGI(TAG, "%s: root files changed but no exported day to attach "
                      "them to — nothing to do", be->id);
-            free(ox_refs); free(st_refs);
             set_be_state(r, SB_IDLE);
             return false;
         }
@@ -364,7 +353,6 @@ static bool run_backend(backend_rt_t *r, int max_days)
                                                       : "cannot connect",
                        res == UPLOAD_ERR_PERMANENT);
         if (be->session_end) be->session_end();
-        free(ox_refs); free(st_refs);
         return true;
     }
 
@@ -380,7 +368,6 @@ static bool run_backend(backend_rt_t *r, int max_days)
     if (!refs) refs = calloc(UPLOAD_MAX_GROUPS_PER_DAY, sizeof(*refs));
     if (!refs) {
         if (be->session_end) be->session_end();
-        free(ox_refs); free(st_refs);
         set_be_state(r, SB_IDLE);
         return false;
     }
@@ -643,8 +630,6 @@ static bool run_backend(backend_rt_t *r, int max_days)
     }
 
     free(refs);
-    free(ox_refs);
-    free(st_refs);
     if (be->session_end) be->session_end();
 
     if (bundle_committed) {
@@ -749,6 +734,21 @@ static void run_pass(void)
         return;
     }
 
+    /* Reconcile oximetry and stage exports once for the whole pass (under the
+     * storage lease if available) and share the ref slices across all backends
+     * instead of re-walking and re-CRCing the SD card per backend + summary.
+     * If either PSRAM allocation fails, CPAP and the surviving stream still
+     * run rather than aborting the whole pass. */
+    upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
+    upload_stage_ref_t *st_refs = heap_caps_malloc(sizeof(upload_stage_ref_t) * UPLOAD_STAGE_MAX_UNITS, MALLOC_CAP_SPIRAM);
+    if (!ox_refs || !st_refs)
+        ESP_LOGW(TAG, "PSRAM low — skipping %s reconcile this pass",
+                 (!ox_refs && !st_refs) ? "oximetry/stage" : (!ox_refs ? "oximetry" : "stage"));
+    bool rec_leased = (ox_refs || st_refs) ? uploader_lease_take(LEASE_WAIT_MS) : false;
+    int n_ox = (rec_leased && ox_refs) ? upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days) : 0;
+    int n_st = (rec_leased && st_refs) ? upload_stage_reconcile(st_refs, UPLOAD_STAGE_MAX_UNITS, max_days) : 0;
+    if (rec_leased) uploader_lease_give();
+
     for (int i = 0; i < n; i++) {
         backend_rt_t *r = rt_for(bes[i]);
         if (!r || r->slot < 0) continue;
@@ -761,30 +761,26 @@ static void run_pass(void)
         if (r->state == SB_COOLDOWN && now_us() < r->retry_at_us) continue;
 
         set_status("Uploading to %s", bes[i]->label ? bes[i]->label : bes[i]->id);
-        run_backend(r, max_days);
+        run_backend(r, max_days, ox_refs, n_ox, st_refs, n_st);
     }
+
+    free(ox_refs);
+    free(st_refs);
 
     /* Summarise for the UI.  Per-stream counts are capability-gated: a
      * backend that cannot consume oximetry or stages does not report those
      * units as pending work. */
     int pending = 0;
     bool cooling = false;
-    upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    if (!ox_refs) { set_status("Memory low"); return; }
-    int n_ox = upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
-    upload_stage_ref_t *st_refs = heap_caps_malloc(sizeof(upload_stage_ref_t) * UPLOAD_STAGE_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    int n_st = st_refs ? upload_stage_reconcile(st_refs, UPLOAD_STAGE_MAX_UNITS, max_days) : 0;
     for (int i = 0; i < s_n_rt; i++) {
         if (s_rt[i].state == SB_DISABLED) continue;
         pending += upload_index_backend_pending(s_rt[i].slot, max_days);
         if (s_rt[i].be->supports_ox && s_rt[i].be->put_oximetry)
-            pending += upload_ox_pending(ox_refs, n_ox, s_rt[i].slot);
-        if (st_refs && s_rt[i].be->supports_stage && s_rt[i].be->put_stage)
-            pending += upload_stage_pending(st_refs, n_st, s_rt[i].slot);
+            pending += upload_ox_cached_pending(s_rt[i].slot);
+        if (s_rt[i].be->supports_stage && s_rt[i].be->put_stage)
+            pending += upload_stage_cached_pending(s_rt[i].slot);
         if (s_rt[i].state == SB_COOLDOWN) cooling = true;
     }
-    free(ox_refs);
-    free(st_refs);
     if (pending == 0) set_status("All uploaded");
     else if (cooling)  set_status("%d parts pending — waiting to retry", pending);
     else               set_status("%d parts pending", pending);
@@ -843,15 +839,20 @@ static void do_scan(void)
     s_scanning = true;
     set_status("Scanning for new data");
     upload_scan_reconcile_all(max_days, slots, n_slots);
-    upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    if (ox_refs) {
-        upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
-        free(ox_refs);
-    }
-    upload_stage_ref_t *st_refs = heap_caps_malloc(sizeof(upload_stage_ref_t) * UPLOAD_STAGE_MAX_UNITS, MALLOC_CAP_SPIRAM);
-    if (st_refs) {
-        upload_stage_reconcile(st_refs, UPLOAD_STAGE_MAX_UNITS, max_days);
-        free(st_refs);
+    /* If run_pass() will be deferred by a gate right after this scan, update
+     * oximetry/stage window membership here; otherwise run_pass() reconciles
+     * both once at the top of the pass. */
+    if (pass_block_reason()) {
+        upload_ox_ref_t *ox_refs = heap_caps_malloc(sizeof(upload_ox_ref_t) * UPLOAD_OX_MAX_UNITS, MALLOC_CAP_SPIRAM);
+        if (ox_refs) {
+            upload_ox_reconcile(ox_refs, UPLOAD_OX_MAX_UNITS, max_days);
+            free(ox_refs);
+        }
+        upload_stage_ref_t *st_refs = heap_caps_malloc(sizeof(upload_stage_ref_t) * UPLOAD_STAGE_MAX_UNITS, MALLOC_CAP_SPIRAM);
+        if (st_refs) {
+            upload_stage_reconcile(st_refs, UPLOAD_STAGE_MAX_UNITS, max_days);
+            free(st_refs);
+        }
     }
     s_scanning = false;
     uploader_lease_give();

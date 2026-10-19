@@ -94,6 +94,7 @@ static int g_failures;
 #define LEGACY_OK UPLOAD_STATE_DIR "/oximetry.json.migrated"
 
 #define N_RECS 70   /* deliberately past the old fixed table's 64 */
+#define N_DAYS ((N_RECS + 3) / 4)   /* 18 distinct days (20260801..20260818) */
 #define WINDOW 45
 
 static void mkdirs(const char *path)
@@ -229,6 +230,11 @@ static int phase_a(const char *self)
     CHECK(upload_ox_pending(refs, kept, SLOT_SHQ) == N_RECS,
           "fresh recordings not all pending");
 
+    int done = -1, total = -1;
+    upload_ox_backend_progress(SLOT_SHQ, WINDOW, &done, &total);
+    CHECK(done == 0 && total == N_DAYS,
+          "progress does not report 0/18 days for a fresh tree");
+
     for (int i = 0; i < kept; i++)
         upload_ox_mark(&refs[i], SLOT_SHQ, UG_OK, "imp-1");
 
@@ -236,6 +242,9 @@ static int phase_a(const char *self)
           "marked recordings still read pending in RAM");
     CHECK(upload_ox_cached_pending(SLOT_SHQ) == 0,
           "cached pending non-zero after marking all");
+    upload_ox_backend_progress(SLOT_SHQ, WINDOW, &done, &total);
+    CHECK(done == N_DAYS && total == N_DAYS,
+          "progress does not report 18/18 days after marking all");
 
     /* The bug this test exists for: unit #65+ must have a state file too. */
     char id[16], day[12], p[896];

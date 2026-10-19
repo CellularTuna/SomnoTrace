@@ -3329,11 +3329,11 @@ function renderBackendRow(b) {
     parts.push('<span>CPAP: <b>' + cDone + '/' + cTotal + 'd</b>' + cOk + '</span>');
     if (b.supports_ox) {
       var oOk = (oxTotal > 0 && oxDone >= oxTotal) ? ' <span style="color:var(--success)">&#10003;</span>' : '';
-      parts.push('<span>Oximetry: <b>' + oxDone + '/' + oxTotal + '</b>' + oOk + '</span>');
+      parts.push('<span>Oximetry: <b>' + oxDone + '/' + oxTotal + 'd</b>' + oOk + '</span>');
     }
     if (b.supports_stage) {
       var sOk = (stTotal > 0 && stDone >= stTotal) ? ' <span style="color:var(--success)">&#10003;</span>' : '';
-      parts.push('<span>Stages: <b>' + stDone + '/' + stTotal + '</b>' + sOk + '</span>');
+      parts.push('<span>Stages: <b>' + stDone + '/' + stTotal + 'd</b>' + sOk + '</span>');
     }
 
     var sub = '';

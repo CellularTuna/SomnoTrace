@@ -224,8 +224,8 @@ static int phase_a(const char *self)
 
     int done = -1, total = -1;
     upload_stage_backend_progress(SLOT_SMB, WINDOW, &done, &total);
-    CHECK(done == 0 && total == N_UNITS,
-          "progress does not report 0/12 for a fresh tree");
+    CHECK(done == 0 && total == N_DAYS,
+          "progress does not report 0/6 days for a fresh tree");
 
     for (int i = 0; i < kept; i++)
         upload_stage_mark(&refs[i], SLOT_SMB, UG_OK, NULL);
@@ -236,8 +236,8 @@ static int phase_a(const char *self)
           "cached pending non-zero after marking all");
     CHECK(state_files() == N_UNITS, "unit files not persisted");
     upload_stage_backend_progress(SLOT_SMB, WINDOW, &done, &total);
-    CHECK(done == N_UNITS && total == N_UNITS,
-          "progress does not report 12/12 after marking all");
+    CHECK(done == N_DAYS && total == N_DAYS,
+          "progress does not report 6/6 days after marking all");
 
     /* #317 parity: Reset must clear disk AND RAM — and the next reconcile
      * must re-offer every CSV still on the card. */

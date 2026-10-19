@@ -152,6 +152,26 @@ static stage_state_t *state_find_id(const char *id)
     return NULL;
 }
 
+static void state_insert_locked(stage_state_t *u)
+{
+    stage_state_t **pp = &s_states;
+    while (*pp && strcmp((*pp)->day, u->day) > 0)
+        pp = &(*pp)->next;
+    u->next = *pp;
+    *pp = u;
+}
+
+static void state_reposition_locked(stage_state_t *u)
+{
+    for (stage_state_t **pp = &s_states; *pp; pp = &(*pp)->next) {
+        if (*pp == u) {
+            *pp = u->next;
+            break;
+        }
+    }
+    state_insert_locked(u);
+}
+
 static stage_state_t *state_get(const char *id, const char *day, uint64_t fp,
                                 bool create)
 {
@@ -160,6 +180,7 @@ static stage_state_t *state_get(const char *id, const char *day, uint64_t fp,
         if (!u->day[0] && day && day[0]) {
             strlcpy(u->day, day, sizeof(u->day));
             u->dirty = true;
+            state_reposition_locked(u);
         }
         return u;
     }
@@ -170,8 +191,7 @@ static stage_state_t *state_get(const char *id, const char *day, uint64_t fp,
     strlcpy(u->id, id, sizeof(u->id));
     if (day) strlcpy(u->day, day, sizeof(u->day));
     u->fingerprint = fp;
-    u->next = s_states;
-    s_states = u;
+    state_insert_locked(u);
     return u;
 }
 
@@ -347,6 +367,7 @@ static void resolve_orphan_days_locked(void)
             if (u && !u->day[0]) {
                 strlcpy(u->day, e->d_name, sizeof(u->day));
                 u->dirty = true;
+                state_reposition_locked(u);
             }
         }
         closedir(dd);
@@ -372,20 +393,15 @@ static int s_window_days;
 static void apply_window_locked(int max_days)
 {
     if (max_days < 1) max_days = 1;
-    for (stage_state_t *u = s_states; u; u = u->next) u->in_window = false;
-    char ceil_day[12] = "";
-    for (int d = 0; d < max_days; d++) {
-        const char *best = NULL;
-        for (stage_state_t *u = s_states; u; u = u->next) {
-            if (!u->day[0]) continue;
-            if (ceil_day[0] && strcmp(u->day, ceil_day) >= 0) continue;
-            if (!best || strcmp(u->day, best) > 0) best = u->day;
+    int days_seen = 0;
+    const char *last_day = "";
+    for (stage_state_t *u = s_states; u; u = u->next) {
+        if (!u->day[0]) { u->in_window = false; continue; }
+        if (strcmp(u->day, last_day) != 0) {
+            last_day = u->day;
+            days_seen++;
         }
-        if (!best) break;
-        for (stage_state_t *u = s_states; u; u = u->next) {
-            if (strcmp(u->day, best) == 0) u->in_window = true;
-        }
-        strlcpy(ceil_day, best, sizeof(ceil_day));
+        u->in_window = (days_seen <= max_days);
     }
     s_window_days = max_days;
 }
@@ -459,7 +475,8 @@ static void resolve_sst_path(upload_stage_ref_t *r)
     cJSON_Delete(j);
 }
 
-static int scan_day(const char *day, upload_stage_ref_t *out, int max_out)
+static int scan_day(const char *day, upload_stage_ref_t *out, int max_out,
+                    bool *truncated)
 {
     char day_path[UPLOAD_STAGE_PATH_LEN];
     if (!valid_day(day) || !join2(day_path, sizeof(day_path), STAGE_EXPORT_DIR, day))
@@ -468,20 +485,26 @@ static int scan_day(const char *day, upload_stage_ref_t *out, int max_out)
     if (!d) return 0;
     int n = 0;
     struct dirent *e;
-    while ((e = readdir(d)) && n < max_out) {
+    while ((e = readdir(d)) != NULL) {
         size_t l = strlen(e->d_name);
         if (l <= 4 || strcmp(e->d_name + l - 4, ".csv") != 0) continue;
         if (l - 4 >= UPLOAD_STAGE_ID_LEN) continue;
-        upload_stage_ref_t *r = &out[n];
-        memset(r, 0, sizeof(*r));
-        strlcpy(r->day, day, sizeof(r->day));
-        memcpy(r->unit_id, e->d_name, l - 4);
-        r->unit_id[l - 4] = '\0';
-        if (!safe_component(r->unit_id, sizeof(r->unit_id))) continue;
+        char id[UPLOAD_STAGE_ID_LEN];
+        memcpy(id, e->d_name, l - 4);
+        id[l - 4] = '\0';
+        if (!safe_component(id, sizeof(id))) continue;
         char local[UPLOAD_STAGE_PATH_LEN];
         if (!join2(local, sizeof(local), day_path, e->d_name)) continue;
         struct stat st;
         if (stat(local, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (n >= max_out) {
+            if (truncated) *truncated = true;
+            break;
+        }
+        upload_stage_ref_t *r = &out[n];
+        memset(r, 0, sizeof(*r));
+        strlcpy(r->day, day, sizeof(r->day));
+        strlcpy(r->unit_id, id, sizeof(r->unit_id));
         strlcpy(r->csv_path, local, sizeof(r->csv_path));
         r->fingerprint = file_fp(0, e->d_name, local);
         resolve_sst_path(r);
@@ -491,7 +514,7 @@ static int scan_day(const char *day, upload_stage_ref_t *out, int max_out)
     return n;
 }
 
-int upload_stage_scan(upload_stage_ref_t *out, int max_out)
+static int scan_days(upload_stage_ref_t *out, int max_out, int max_days)
 {
     if (!out || max_out <= 0) return 0;
     upload_stage_init();
@@ -532,20 +555,34 @@ int upload_stage_scan(upload_stage_ref_t *out, int max_out)
     }
     closedir(root);
 
-    int n = 0, i = 0;
-    for (i = 0; i < nd && n < max_out; i++)
-        n += scan_day(days[i], &out[n], max_out - n);
-    if (i < nd)
+    int n = 0, i = 0, days_with_data = 0;
+    bool truncated = false;
+    for (i = 0; i < nd; i++) {
+        if (max_days > 0 && days_with_data >= max_days) break;
+        if (n >= max_out) { truncated = true; break; }
+        int added = scan_day(days[i], &out[n], max_out - n, &truncated);
+        if (added > 0) {
+            n += added;
+            days_with_data++;
+        }
+        if (truncated) break;
+    }
+    if (truncated)
         ESP_LOGW(TAG, "more than %d stage exports on the card — oldest day(s) "
                  "not visible to the uploader this pass", max_out);
     free(days);
     return n;
 }
 
+int upload_stage_scan(upload_stage_ref_t *out, int max_out)
+{
+    return scan_days(out, max_out, 0);
+}
+
 int upload_stage_reconcile(upload_stage_ref_t *out, int max_out, int max_days)
 {
-    int n = upload_stage_scan(out, max_out);
     if (max_days < 1) max_days = 1;
+    int n = scan_days(out, max_out, max_days);
     if (!st_lock_init()) {
         ESP_LOGE(TAG, "state lock unavailable — stage pass skipped");
         return 0;
@@ -684,11 +721,23 @@ void upload_stage_backend_progress(int backend_slot, int max_days,
         st_lock();
         if (max_days > 0 && max_days != s_window_days)
             apply_window_locked(max_days);
+        /* Count distinct in-window days in a single pass (s_states is kept
+         * sorted by day descending): a day is done when every stage export in
+         * it is UG_OK, matching CPAP's day-bundle semantics. */
+        const char *cur_day = NULL;
+        bool day_ok = true;
         for (stage_state_t *u = s_states; u; u = u->next) {
-            if (!u->in_window) continue;
-            total++;
-            if (u->backend[backend_slot].status == UG_OK) done++;
+            if (!u->in_window || !u->day[0]) continue;
+            if (!cur_day || strcmp(u->day, cur_day) != 0) {
+                if (cur_day && day_ok) done++;
+                cur_day = u->day;
+                day_ok = true;
+                total++;
+            }
+            if (u->backend[backend_slot].status != UG_OK)
+                day_ok = false;
         }
+        if (cur_day && day_ok) done++;
         st_unlock();
     }
     if (out_done) *out_done = done;

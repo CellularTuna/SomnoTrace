@@ -28,14 +28,14 @@
 #include "upload_index.h"
 
 /* Bounds the ref array returned by upload_ox_scan()/reconcile() — one ref is
- * ~5.5 KB (paths), allocs are transient PSRAM.  This is NOT a state cap:
+ * ~1.3 KB (paths), allocs are transient PSRAM.  This is NOT a state cap:
  * upload state is a grow-on-demand list persisted per recording, so exceeding
  * this only hides the oldest recordings from one pass (a warning is logged). */
-#define UPLOAD_OX_MAX_UNITS 128
-#define UPLOAD_OX_MAX_FILES 8
+#define UPLOAD_OX_MAX_UNITS 768
+#define UPLOAD_OX_MAX_FILES 4
 #define UPLOAD_OX_ID_LEN 64
-#define UPLOAD_OX_PATH_LEN 512
-#define UPLOAD_OX_REL_LEN 96
+#define UPLOAD_OX_PATH_LEN 192
+#define UPLOAD_OX_REL_LEN 48
 
 typedef struct {
     char day[12];
