@@ -131,7 +131,7 @@ def main():
         print(f"O2 import creation failed: HTTP {status}", file=sys.stderr)
         return 1
     digest = hashlib.md5(name.encode() + payload).hexdigest()
-    body, content_type = multipart({"import_id": import_id, "name": name, "path": "/OXYMETRY/contract-test", "content_hash": digest}, name, payload)
+    body, content_type = multipart({"import_id": import_id, "name": name, "path": "/OXIMETRY/contract-test", "content_hash": digest}, name, payload)
     status, uploaded = request("POST", f"/api/v1/imports/{import_id}/files", token=token, body=body, content_type=content_type)
     if status != 201:
         print(f"O2 file upload failed: HTTP {status} import={import_id}", file=sys.stderr)

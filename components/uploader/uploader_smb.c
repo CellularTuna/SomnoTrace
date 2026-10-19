@@ -573,12 +573,17 @@ static upload_result_t smb_put_bundle(const char *day,
     return UPLOAD_OK;
 }
 
+/* Oximetry and SomnoStage files group under <TYPE>/<YYYYMM>/ — the first six
+ * digits of the noon-day.  Filenames already carry a full timestamp, so a
+ * month folder loses no information while keeping one OSCAR import per folder
+ * instead of one per day.  CPAP stays per-day under DATALOG/ because OSCAR's
+ * ResMed importer expects that card layout. */
 static upload_result_t smb_ox_day_begin(const char *day)
 {
     if (!s_smb || !day) return UPLOAD_ERR_TRANSIENT;
     char path[640];
-    snprintf(path, sizeof(path), "%sOXYMETRY", s_remote_base); smb2_mkdir(s_smb, path);
-    snprintf(path, sizeof(path), "%sOXYMETRY/%s", s_remote_base, day); smb2_mkdir(s_smb, path);
+    snprintf(path, sizeof(path), "%sOXIMETRY", s_remote_base); smb2_mkdir(s_smb, path);
+    snprintf(path, sizeof(path), "%sOXIMETRY/%.6s", s_remote_base, day); smb2_mkdir(s_smb, path);
     return UPLOAD_OK;
 }
 
@@ -591,7 +596,7 @@ static upload_result_t smb_put_oximetry(const upload_ox_ref_t *ref)
             strcmp(rel, "source/source.vld") != 0) continue;
         const char *ext = strstr(rel, ".vld") ? ".vld" : ".bin";
         char path[760];
-        snprintf(path, sizeof(path), "%sOXYMETRY/%s/%s%s", s_remote_base,
+        snprintf(path, sizeof(path), "%sOXIMETRY/%.6s/%s%s", s_remote_base,
                  ref->day, ref->recording_id, ext);
         return smb_upload_file(s_smb, ref->local_paths[i], path);
     }
@@ -604,7 +609,7 @@ static upload_result_t smb_stage_day_begin(const char *day)
     char path[640];
     snprintf(path, sizeof(path), "%sSOMNOSTAGE", s_remote_base);
     smb2_mkdir(s_smb, path);
-    snprintf(path, sizeof(path), "%sSOMNOSTAGE/%s", s_remote_base, day);
+    snprintf(path, sizeof(path), "%sSOMNOSTAGE/%.6s", s_remote_base, day);
     smb2_mkdir(s_smb, path);
     return UPLOAD_OK;
 }
@@ -614,7 +619,7 @@ static upload_result_t smb_put_stage(const upload_stage_ref_t *ref)
     if (!s_smb || !ref || !ref->unit_id[0] || !ref->csv_path[0])
         return UPLOAD_ERR_TRANSIENT;
     char path[760];
-    snprintf(path, sizeof(path), "%sSOMNOSTAGE/%s/%s.csv", s_remote_base,
+    snprintf(path, sizeof(path), "%sSOMNOSTAGE/%.6s/%s.csv", s_remote_base,
              ref->day, ref->unit_id);
     return smb_upload_file(s_smb, ref->csv_path, path);
 }

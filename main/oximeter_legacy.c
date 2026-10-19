@@ -989,7 +989,7 @@ static esp_err_t legacy_convert_stored(const char *name)
     strlcpy(recording_id, name, sizeof(recording_id));
     char *dot = strrchr(recording_id, '.');
     if (dot) *dot = '\0';
-    snprintf(source_path, sizeof(source_path), SD_OXYMETRY_DIR "/files/%s/%s",
+    snprintf(source_path, sizeof(source_path), SD_OXIMETRY_DIR "/files/%s/%s",
              s_serial, name);
     esp_err_t conversion = oximetry_canonical_convert_vld3(s_serial, recording_id, source_path);
     if (conversion != ESP_OK) {

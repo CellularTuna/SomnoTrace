@@ -50,7 +50,7 @@
 #define SD_UPLOAD_STATE_DIR  SD_APP_DIR "/upload_state"
 
 /* Oximetry raw files from O2 Ring (Format A blobs, not EDF) */
-#define SD_OXYMETRY_DIR       SD_APP_DIR "/oximetry"
+#define SD_OXIMETRY_DIR       SD_APP_DIR "/oximetry"
 
 /* SomnoStage consumer-facing exports (Zeo-compatible sleep stage CSVs,
  * derived from the internal .sst sidecars — one file per scored unit) */

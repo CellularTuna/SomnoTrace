@@ -54,7 +54,7 @@ void ox_store_index_mark_converted(const char *serial, const char *name,
 
 static const char *TAG = "ox_canon";
 
-#define OX_ROOT       SD_OXYMETRY_DIR
+#define OX_ROOT       SD_OXIMETRY_DIR
 #define OX_DEVICES    OX_ROOT "/devices"
 #define OX_INBOX      OX_ROOT "/inbox"
 #define OX_STAGING    OX_ROOT "/staging"

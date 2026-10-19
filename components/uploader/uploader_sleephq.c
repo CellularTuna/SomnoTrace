@@ -545,7 +545,7 @@ static upload_result_t shq_put_oximetry(const upload_ox_ref_t *ref)
         if (strcmp(rel, "source/source.bin") != 0 &&
             strcmp(rel, "source/source.vld") != 0) continue;
         char subpath[96];
-        snprintf(subpath, sizeof(subpath), "/OXYMETRY/%s", ref->day);
+        snprintf(subpath, sizeof(subpath), "/OXIMETRY/%s", ref->day);
         char filename[128];
         snprintf(filename, sizeof(filename), "%s",
                  ref->source_name[0] ? ref->source_name : "oximetry");

@@ -245,7 +245,7 @@ Format A file:
 
 ### 4.4 Storage
 
-Add `SD_OXYMETRY_DIR` (`SD_APP_DIR "/oximetry"`) and mkdir it in
+Add `SD_OXIMETRY_DIR` (`SD_APP_DIR "/oximetry"`) and mkdir it in
 `sd_storage_init()`. Do **not** store pulls under `SDCARD/`.
 Do **not** upload these files in v1.
 

@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-/* The canonical tree is rooted below SD_OXYMETRY_DIR.  It intentionally does
+/* The canonical tree is rooted below SD_OXIMETRY_DIR.  It intentionally does
  * not overlap the legacy oximeter_store.c files/ tree. */
 #define OXIMETRY_CANONICAL_MAX_COMPONENT 64
 #define OXIMETRY_CANONICAL_MAX_PATH      512
