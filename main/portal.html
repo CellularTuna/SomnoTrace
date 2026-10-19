@@ -111,6 +111,21 @@ main{flex:1;padding:16px;max-width:1440px;width:100%;margin:0 auto;display:flex;
 .card-danger{border-left-color:var(--danger)}
 .card-title{font-size:1rem;font-weight:600;margin-bottom:14px;color:var(--text);display:flex;align-items:center;gap:8px}
 .card-title svg{width:18px;height:18px;fill:var(--primary)}
+/* Backend brand marks, hot-linked from each service so no third-party artwork is
+ * redistributed in this GPL repo.  The remote logo is layered over the card's
+ * existing generic inline icon, which stays as the placeholder and reserves the
+ * slot, so a failed, blocked or offline fetch degrades to the pre-branding look
+ * with no layout shift.  The <img> only fades in once it actually loads. */
+.card-logo{position:relative;display:inline-block;width:18px;height:18px;flex:none;overflow:hidden}
+.card-logo>svg{position:absolute;left:0;top:0;width:18px;height:18px}
+.card-logo>img{position:absolute;left:0;top:0;width:18px;height:18px;max-width:none;opacity:0;transition:opacity .25s}
+.card-logo.on>img{opacity:1}
+.card-logo.on>svg{opacity:0}
+/* SleepHQ publishes a 990x210 lockup (swirl + "SleepHQ" wordmark), not a square
+ * icon.  The swirl occupies units 0..304 and the wordmark starts at 329, so
+ * drawing the lockup at 58.7x12.4 (swirl exactly 18px wide) and anchoring it
+ * left lets the slot crop the wordmark off and show the whole swirl. */
+.card-logo-shq>img{top:2.8px;width:58.7px;height:12.4px}
 
 /* ── Form Elements ─────────────────────────────────────────────── */
 .form-group{margin-bottom:14px;display:flex;flex-direction:column;gap:5px}
@@ -667,7 +682,7 @@ Network Folder (SMB Share)
 <!-- SleepHQ Cloud -->
 <div class="card card-shq" id="shq-card">
 <div class="card-title">
-<svg viewBox="0 0 24 24"><path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.99 5.99 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM19 18H6c-2.21 0-4-1.79-4-4s1.79-4 4-4h.71A5.5 5.5 0 0 1 12 6c2.76 0 5 2.24 5 5v1h2c1.65 0 3 1.35 3 3s-1.35 3-3 3z"/></svg>
+<span class="card-logo card-logo-shq"><svg viewBox="0 0 24 24"><path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.99 5.99 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM19 18H6c-2.21 0-4-1.79-4-4s1.79-4 4-4h.71A5.5 5.5 0 0 1 12 6c2.76 0 5 2.24 5 5v1h2c1.65 0 3 1.35 3 3s-1.35 3-3 3z"/></svg><img src="https://www.sleephq.com/logo/logo_horizontal.svg" alt="" loading="eager" referrerpolicy="no-referrer" onload="this.parentNode.classList.add('on')" onerror="this.remove()"></span>
 SleepHQ Cloud Upload
 </div>
 <div class="toggle-row">
@@ -701,7 +716,7 @@ SleepHQ Cloud Upload
 
 <div class="card card-aer" id="aer-card">
 <div class="card-title">
-<svg viewBox="0 0 24 24"><path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.99 5.99 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM19 18H6c-2.21 0-4-1.79-4-4s1.79-4 4-4h.71A5.5 5.5 0 0 1 12 6c2.76 0 5 2.24 5 5v1h2c1.65 0 3 1.35 3 3s-1.35 3-3 3z"/></svg>
+<span class="card-logo"><svg viewBox="0 0 24 24"><path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.99 5.99 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM19 18H6c-2.21 0-4-1.79-4-4s1.79-4 4-4h.71A5.5 5.5 0 0 1 12 6c2.76 0 5 2.24 5 5v1h2c1.65 0 3 1.35 3 3s-1.35 3-3 3z"/></svg><img src="https://aerivue.app/favicon.svg" alt="" loading="eager" referrerpolicy="no-referrer" onload="this.parentNode.classList.add('on')" onerror="this.remove()"></span>
 Aerivue Upload
 </div>
 <div class="toggle-row">
@@ -730,7 +745,7 @@ Aerivue Upload
 
 <div class="card card-br" id="br-card">
 <div class="card-title">
-<svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+<span class="card-logo"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg><img src="https://breathingroom.io/favicon.svg" alt="" loading="eager" referrerpolicy="no-referrer" onload="this.parentNode.classList.add('on')" onerror="this.remove()"></span>
 BreathingRoom Upload
 </div>
 <div class="toggle-row">
