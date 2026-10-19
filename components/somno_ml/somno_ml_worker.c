@@ -620,9 +620,9 @@ typedef struct {
 } vitals_meta_t;
 
 /* Open + validate a vitals.snt, positioned at the first record.
- * Returns NULL on any failure; *bad_header (when given) is set only for
- * deterministic content problems (bad magic/fields), not for fopen errors
- * or truncated reads which may still be growing or transient. */
+ * Returns NULL on any failure; *bad_header (when given) is set for
+ * content/truncation problems (short header, bad magic/fields), not for
+ * fopen errors which may be transient. */
 static FILE *vitals_open(const char *vitals_path, vitals_meta_t *m,
                          int *bad_header)
 {
@@ -632,6 +632,7 @@ static FILE *vitals_open(const char *vitals_path, vitals_meta_t *m,
     uint8_t hdr[64];
     if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
         fclose(f);
+        if (bad_header) *bad_header = 1;
         return NULL;
     }
     if (rd_u32(hdr) != 0x33544e53u || hdr[4] != 3) {   /* "SNT3" v3 */
@@ -992,7 +993,7 @@ static int score_sa2(const char *sa2_path, const char *sst_path,
     uint8_t hdr[28];
     if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
         fclose(f);
-        return -1;   /* short read: possibly still growing — stay stale */
+        return mark_unscorable(sst_path, SOMNO_SST_SOURCE_AS11, job_id);
     }
     if (rd_u32(hdr) != 0x534e5442u) {   /* SNT_MAGIC (disk bytes "BTNS") */
         fclose(f);

@@ -140,6 +140,20 @@ int main(void)
         assert(somno_ml_sst_validate(path,NULL,0) & SOMNO_SST_FLAG_INSUFFICIENT);
         cleanup(&group[i]);
     }
+    /* 0-byte / truncated _sa2.snt from an interrupted session must be marked
+     * INSUFFICIENT so reconcile stops re-enqueueing it on every boot. */
+    {
+        char sa2[400], sst[400];
+        snprintf(sa2, sizeof(sa2), "%s/20260708_165632_sa2.snt", dir);
+        snprintf(sst, sizeof(sst), "%s/20260708_165632_stages.sst", dir);
+        FILE *f = fopen(sa2, "wb"); assert(f); fclose(f);
+        somno_ml_job_t empty_job = { .type = SOMNO_ML_SRC_AS11_SA2 };
+        strlcpy(empty_job.dir, dir, sizeof(empty_job.dir));
+        strlcpy(empty_job.id, "20260708_165632", sizeof(empty_job.id));
+        assert(somno_ml_score_file(&empty_job) == 0);
+        assert(somno_ml_sst_validate(sst, NULL, 0) & SOMNO_SST_FLAG_INSUFFICIENT);
+        assert(unlink(sa2) == 0 && unlink(sst) == 0);
+    }
     assert(rmdir(dir)==0);
     somno_ml_job_t active = { .type = SOMNO_ML_SRC_AS11_SA2 };
     strlcpy(active.dir,"/synthetic/day",sizeof(active.dir));
